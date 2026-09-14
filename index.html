@@ -383,6 +383,13 @@ select,input,button,textarea{font-family:inherit}
     // the highest-id (most recently created/imported) record per clientId+renewalType and
     // removing the rest.
     const toUpdate = [];
+    // Reassignments detected during matching (existing record's owner differs from the current
+    // row's) — surfaced back to the caller so a hub's import-review screen can show them BEFORE
+    // they're applied, same as it already shows new/updated/skipped counts. A reassignment is
+    // exactly the kind of change that's easy to get silently wrong (typo'd staff name, duplicate
+    // person, wrong client matched) — it should be something a person glances at and confirms,
+    // not something that only becomes visible after the fact via a support ticket.
+    const reassignments = [];
     const dupesByKey = {};
     existingRenewals.forEach(r => {
       if (r.status === 'Removed') return;
@@ -460,11 +467,23 @@ select,input,button,textarea{font-family:inherit}
       const existing = existingByKey[row.key];
       if (existing) {
         consumedExisting.add(existing.id);
+        // FIX (9/14): a reassignment in Pimsy (same client, same renewal type, new peer
+        // supporter) used to leave existing.peerSupporter/manager untouched forever — this
+        // pass only ever refreshed dates. That's the root cause of the weekly "shows on the
+        // old person's list, never shows up on the new person's" reports: the record kept
+        // whichever staff name it was first imported under, no matter how many times Pimsy
+        // was re-exported with the new owner. Now the current row's staff assignment always
+        // wins on a match, same as its dates do.
         const changed = existing.dueDate !== row.expiresOn
           || existing.lastBillableDate !== (row.lastBillableDate || null)
-          || existing.referralSource !== (row.referralSource || null);
+          || existing.referralSource !== (row.referralSource || null)
+          || existing.peerSupporter !== row.staffName
+          || existing.manager !== row.staffMgr;
+        if (existing.peerSupporter && existing.peerSupporter !== row.staffName) {
+          reassignments.push({ clientId: existing.clientId, renewalType: existing.renewalType, from: existing.peerSupporter, to: row.staffName });
+        }
         if (changed) {
-          toUpdate.push({ id: existing.id, dueDate: row.expiresOn, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null });
+          toUpdate.push({ id: existing.id, dueDate: row.expiresOn, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null, peerSupporter: row.staffName, manager: row.staffMgr });
         } else {
           dupes++;
         }
@@ -504,12 +523,19 @@ select,input,button,textarea{font-family:inherit}
       // one with the latest existing due date, since that's the most-recently-progressed stage.
       const best = candidates.reduce((a, b) => new Date(b.dueDate || 0) > new Date(a.dueDate || 0) ? b : a);
       consumedExisting.add(best.id);
+      // FIX (9/14): same staff-assignment fix as Pass 1 — a family-match (stage transition)
+      // must also carry forward the row's current peer supporter/manager, not just dueDate.
       const changed = best.dueDate !== row.expiresOn
         || best.renewalType !== row.renewalType
         || best.lastBillableDate !== (row.lastBillableDate || null)
-        || best.referralSource !== (row.referralSource || null);
+        || best.referralSource !== (row.referralSource || null)
+        || best.peerSupporter !== row.staffName
+        || best.manager !== row.staffMgr;
+      if (best.peerSupporter && best.peerSupporter !== row.staffName) {
+        reassignments.push({ clientId: best.clientId, renewalType: row.renewalType, from: best.peerSupporter, to: row.staffName });
+      }
       if (changed) {
-        toUpdate.push({ id: best.id, dueDate: row.expiresOn, renewalType: row.renewalType, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null });
+        toUpdate.push({ id: best.id, dueDate: row.expiresOn, renewalType: row.renewalType, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null, peerSupporter: row.staffName, manager: row.staffMgr });
       } else {
         dupes++;
       }
@@ -528,12 +554,18 @@ select,input,button,textarea{font-family:inherit}
       });
       if (best) {
         consumedExisting.add(best.id);
+        // FIX (9/14): same staff-assignment fix as Pass 1/2 for the due-date-proximity fallback.
         const changed = best.dueDate !== row.expiresOn
           || best.renewalType !== row.renewalType
           || best.lastBillableDate !== (row.lastBillableDate || null)
-          || best.referralSource !== (row.referralSource || null);
+          || best.referralSource !== (row.referralSource || null)
+          || best.peerSupporter !== row.staffName
+          || best.manager !== row.staffMgr;
+        if (best.peerSupporter && best.peerSupporter !== row.staffName) {
+          reassignments.push({ clientId: best.clientId, renewalType: row.renewalType, from: best.peerSupporter, to: row.staffName });
+        }
         if (changed) {
-          toUpdate.push({ id: best.id, dueDate: row.expiresOn, renewalType: row.renewalType, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null });
+          toUpdate.push({ id: best.id, dueDate: row.expiresOn, renewalType: row.renewalType, lastBillableDate: row.lastBillableDate || null, referralSource: row.referralSource || null, peerSupporter: row.staffName, manager: row.staffMgr });
         } else {
           dupes++;
         }
@@ -573,8 +605,14 @@ select,input,button,textarea{font-family:inherit}
       seen.add(key);
       const existing = existingBillingByKey[key];
       if (existing) {
-        if (existing.lastBillableDate !== b.lastBillableDate) {
-          toUpdate.push({ id: existing.id, dueDate: null, lastBillableDate: b.lastBillableDate });
+        // FIX (9/14): same staff-assignment fix — the purple billing-status pseudo-record is
+        // the one most likely to be the ONLY renewal record a newly-reassigned client has, so
+        // this was the clearest case of "reassigned, never shows up on the new person's list."
+        if (existing.peerSupporter && existing.peerSupporter !== b.peerSupporter) {
+          reassignments.push({ clientId: existing.clientId, renewalType: BILLING_STATUS_TYPE, from: existing.peerSupporter, to: b.peerSupporter });
+        }
+        if (existing.lastBillableDate !== b.lastBillableDate || existing.peerSupporter !== b.peerSupporter || existing.manager !== b.manager) {
+          toUpdate.push({ id: existing.id, dueDate: null, lastBillableDate: b.lastBillableDate, peerSupporter: b.peerSupporter, manager: b.manager });
         } else {
           dupes++;
         }
@@ -587,7 +625,7 @@ select,input,button,textarea{font-family:inherit}
       });
     });
 
-    return { toImport, toUpdate, dupes };
+    return { toImport, toUpdate, dupes, reassignments };
   }
 
   return {
@@ -651,7 +689,17 @@ const db = {
 // redundant local fallback only in case the network call hasn't landed yet.
 // ══════════════════════════════════════════════════════════
 let STAFF_ALIAS_MAP = {}; // normalized-alias-string -> staff_id, loaded once per session
-const normAliasName = n => n ? String(n).trim().replace(/\s+/g,' ').toLowerCase() : '';
+// FIX (9/14): now strips parenthetical annotations (e.g. "Martha (HOLD) Continenza" — ops
+// appends a status like "(HOLD)" mid-name in the Pimsy export for cases waiting on Medicaid
+// verification) and invisible/zero-width characters, matching the ceNorm() normalizer that
+// matchEngagementToRoster/matchNameValueToRoster already use for exactly this reason. Before
+// this fix, ANY staff member with an ops annotation in their exported name would silently fail
+// every match — alias table included, since resolveStaffByAlias runs through this same
+// function — regardless of whether an alias row existed for them. Safe for existing stored
+// staff_aliases rows: none of them contain literal parentheses, so this is a no-op for every
+// alias already saved and only changes behavior for names that actually have "(...)" in them.
+const INVISIBLE_NAME_CHARS_RE = new RegExp('[' + [0x200B,0x200C,0x200D,0xFEFF,0x00A0].map(function(c){return String.fromCharCode(c);}).join('') + ']', 'g');
+const normAliasName = n => n ? String(n).replace(/\([^)]*\)/g,' ').replace(INVISIBLE_NAME_CHARS_RE,' ').trim().replace(/\s+/g,' ').toLowerCase() : '';
 async function loadStaffAliasMap(){
   const map = {};
   S.staff.forEach(s=>{ if(s.fn&&s.ln) map[normAliasName(s.fn+' '+s.ln)] = s.id; });
@@ -1763,8 +1811,9 @@ function modH(){
           <div>🔄 <strong>${((rev.toUpdate||[]).length-(rev.closed||0))}</strong> existing renewal${((rev.toUpdate||[]).length-(rev.closed||0))!==1?'s':''} will be updated (due date / last billable date changed)</div>
           <div>🗂️ <strong>${rev.closed||0}</strong> renewal${(rev.closed||0)!==1?'s':''} will be closed out — client no longer appears anywhere in this file (likely final-noted/discharged)</div>
           <div>↩️ <strong>${rev.dupes}</strong> already up to date, skipped</div>
-          <div>⚠️ <strong>${rev.noMatch}</strong> row${rev.noMatch!==1?'s':''} skipped — Peer Supporter not found on staff roster</div>
+          <div>⚠️ <strong>${rev.noMatch}</strong> row${rev.noMatch!==1?'s':''} skipped — Peer Supporter not found on staff roster${rev.unmatchedNames&&rev.unmatchedNames.length?`: ${rev.unmatchedNames.slice(0,10).map(xe).join(', ')}${rev.unmatchedNames.length>10?'…':''}`:''}</div>
           <div>ℹ️ <strong>${rev.noDate}</strong> row${rev.noDate!==1?'s':''} had no Expires On date (not tracked as a deadline, but still counted toward that client's billing-status/purple check)</div>
+          ${rev.reassignments&&rev.reassignments.length?`<div style="color:#a07e0a">🔁 <strong>${rev.reassignments.length}</strong> renewal${rev.reassignments.length!==1?'s':''} changing owner — double-check these before applying: ${rev.reassignments.slice(0,10).map(r=>xe(`${r.clientId} (${r.from} → ${r.to})`)).join(', ')}${rev.reassignments.length>10?'…':''}</div>`:''}
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevRen=null;H.om('data');">Cancel</button>${(rev.toImport.length>0||(rev.toUpdate||[]).length>0)?`<button id="renBulkConfirmBtn" class="btn-n" style="font-size:11px" onclick="H.confirmRenBulk()">Apply ${rev.toImport.length+(rev.toUpdate||[]).length} Change${(rev.toImport.length+(rev.toUpdate||[]).length)!==1?'s':''}</button>`:''}</div>
       </div>`:''}
@@ -4539,7 +4588,20 @@ async delSRow(enc){
   BILLING_STATUS_TYPE:'No Billable Note',
   parseRenText(raw){
     if(!raw||!raw.trim()){alert('That file appears to be empty.');return;}
-    const staffByName={};S.staff.forEach(s=>{const k=(s.fn+' '+s.ln).trim().toLowerCase().replace(/\s+/g,' ');staffByName[k]=s;});
+    // FIX (9/14): this was a bare exact-string match on full legal name — the ONLY roster-
+    // matching function in this file that skipped the alias resolution (live Supabase
+    // staff_aliases table, then each staff record's own .al field) that matchEngagementToRoster,
+    // matchNameValueToRoster and supRowsFromSheets all already use. A staff member whose Pimsy
+    // export name doesn't exactly match their roster fn/ln (a nickname like "Molly" for a
+    // roster entry under a legal name, a middle name, etc.) had every one of their rows silently
+    // dropped as noMatch — never imported, never updated, invisible in Renewals — while name
+    // resolution elsewhere in the hub (which does check aliases) still finds them fine, which is
+    // exactly the "not in renewals section at all but data is on main page" pattern.
+    // Uses the shared normAliasName() (fixed 9/14 to strip parenthetical annotations like
+    // "(HOLD)" and invisible characters) rather than its own ad hoc normalization, so this
+    // fallback map stays in sync with whatever resolveStaffByAlias() does — one normalizer,
+    // not two that can quietly drift apart again.
+    const staffByName={};S.staff.forEach(s=>{staffByName[normAliasName(s.fn+' '+s.ln)]=s; if(s.al){staffByName[normAliasName(s.al)]=s;}});
     const parseUSDate=(d)=>{d=(d||'').trim();if(!d)return'';const m=d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);if(!m)return'';return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;};
 
     // FIX (8/11): the matching/update logic (relabeling fallback, billing-status refresh, dup
@@ -4571,6 +4633,12 @@ async delSRow(enc){
     // and no-date bookkeeping, which are different concerns and must not be conflated with it.
     const knownClientIds=new Set();
     let noMatch=0,noDate=0;
+    // FIX (9/14): named alongside the counts now, not just counted — a bare "3 rows skipped"
+    // is exactly what let Molly's rows go unnoticed for weeks. This mirrors the Hospital
+    // Outcomes preview above (M.prevHosp.excludedNames), which already lists skipped names —
+    // Renewals was the one importer in this hub that didn't.
+    const unmatchedNames=[];
+    const seenUnmatched=new Set();
     const parsedRows=[];
     for(let i=start;i<lines.length;i++){
       const p=lines[i].split('\t');
@@ -4585,8 +4653,12 @@ async delSRow(enc){
       if(clientId)knownClientIds.add(clientId.toLowerCase());
       if(!clientId||!peerRaw){continue;}
       const nameKey=peerRaw.toLowerCase().replace(/\s+/g,' ');
-      const staff=staffByName[nameKey];
-      if(!staff){noMatch++;continue;}
+      const staff=resolveStaffByAlias(peerRaw)||staffByName[nameKey];
+      if(!staff){
+        noMatch++;
+        if(!seenUnmatched.has(nameKey)){seenUnmatched.add(nameKey);unmatchedNames.push(peerRaw);}
+        continue;
+      }
       if(!expiresOn && !lastBillableDate){noDate++;continue;}
       if(!expiresOn)noDate++;
       parsedRows.push({
@@ -4595,9 +4667,9 @@ async delSRow(enc){
       });
     }
 
-    const {toImport,toUpdate,dupes}=ThriveRenewals.mergeRenewalImport(S.renewals,parsedRows,{dueDateFallbackDays:5,knownClientIds});
+    const {toImport,toUpdate,dupes,reassignments}=ThriveRenewals.mergeRenewalImport(S.renewals,parsedRows,{dueDateFallbackDays:5,knownClientIds});
     const closed=toUpdate.filter(u=>u.reason==='discharged').length;
-    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed};
+    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[]};
     modH();
   },
   // FIX: previously only applied rev.toImport and returned early whenever there were zero new
@@ -4635,6 +4707,11 @@ async delSRow(enc){
       if(u.renewalType!=null)patch.renewalType=u.renewalType;
       if(u.referralSource!==undefined)patch.referralSource=u.referralSource;
       if(u.status!=null)patch.status=u.status;
+      // FIX (9/14): mergeRenewalImport's toUpdate entries now carry peerSupporter/manager
+      // whenever a reassignment was detected (see shared renewals module) — this was silently
+      // dropped on the floor here, so the merge's fix alone wasn't enough on its own.
+      if(u.peerSupporter!=null)patch.peerSupporter=u.peerSupporter;
+      if(u.manager!=null)patch.manager=u.manager;
       const idx=byId.get(u.id);
       if(idx!=null)nextRenewals[idx]={...nextRenewals[idx],...patch};
     });
