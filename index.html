@@ -750,6 +750,7 @@ async function syncFromSupabase(){
     const supOv=parse('sup_overrides');if(supOv){S.supOverrides={...S.supOverrides,...supOv};sv('supov',S.supOverrides);}
     const pmOv=parse('pm_overrides');if(pmOv){S.pmOverrides={...S.pmOverrides,...pmOv};sv('pmov',S.pmOverrides);}
     const upAt=parse('uploads_at');if(upAt){S.upAt={...S.upAt,...upAt};sv('upAt',S.upAt);}
+    const impreg=parse('import_registry');if(impreg){S.impreg={...S.impreg,...impreg};sv('impreg',S.impreg);}
     const ren=parse('renewals');if(ren&&Array.isArray(ren)&&ren.length>0){S.renewals=cleanStaleLocationNotes(ren);sv('r',S.renewals);}
     const supImp=parse('sup_import');if(supImp&&Object.keys(supImp).length>0){S.supImport=foldLegacyCredentials(foldSupAliases({...(S.supImport||{}),...supImp}));sv('supimp',S.supImport);}
     const hospD=parse('hospital_data');if(hospD){S.hospData=hospD;sv('hospData',S.hospData);}
@@ -1001,7 +1002,7 @@ const RESOURCE_LINKS=[
 // just an opt-in for callers that need to know the real result.
 async function sv(k,v){
   try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
-  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw'};
+  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry'};
   if(sharedKeys[k]&&typeof db!=='undefined'&&SB_KEY.length>50){
     const saved = await db.upsert('appdata',{key:sharedKeys[k],value:JSON.stringify(v)},'key');
     if(!saved){
@@ -1023,6 +1024,95 @@ function showSaveError(msg){
   setTimeout(()=>t.remove(),8000);
 }
 function lv(k,d){try{const v=localStorage.getItem('ths_'+k);if(v!==null)return JSON.parse(v);return d;}catch(e){return d;}}
+
+// ══════════════════════════════════════════════════════════
+// IMPORT REGISTRY — Data Catalog build-out (added 9/14/26, per the Data Ingestion
+// Architecture plan). One shared appdata key ('import_registry') recording, per dataset,
+// when it was last uploaded, by whom, the source filename, and how many rows landed —
+// so the Data Catalog tab can show real freshness instead of a hidden/guessed status.
+// This is purely additive: it doesn't touch any existing parsing/commit logic, it just
+// records a small envelope alongside it. See recordImport() call sites in each commit*
+// function below, and catalogV() for the tab that reads this back.
+// ══════════════════════════════════════════════════════════
+function recordImport(datasetKey, meta){
+  meta = meta || {};
+  const entry = {
+    uploaded_at: new Date().toISOString(),
+    uploaded_by: S.editUser || S.role || 'Unknown',
+    source_filename: meta.source_filename || S._lastFile || null,
+    row_count: (typeof meta.row_count === 'number') ? meta.row_count : null,
+    period_label: meta.period_label || null,
+  };
+  S.impreg = {...(S.impreg||{}), [datasetKey]: entry};
+  sv('impreg', S.impreg);
+}
+// Static catalog of every known recurring dataset across the ecosystem — not just the ones
+// this hub uploads. registryKey ties a row to a real recordImport() entry (real freshness);
+// rows with registryKey:null are uploaded/edited elsewhere and aren't wired to this registry
+// yet — shown honestly as "not tracked here yet" rather than a guessed date. See the Data
+// Ingestion Architecture doc's repo-by-repo table for where each of these came from.
+const DATA_CATALOG = [
+  {registryKey:'roster_hours', label:'Roster — Billable Hours', supaKey:'pd (hours field)', uploadedVia:'Data & Staff Hub', consumers:'Every manager hub, BD Dashboard (Progress to Goal)', cadenceDays:14},
+  {registryKey:'roster_caseload', label:'Roster — Caseload / Engagement', supaKey:'pd (caseload field)', uploadedVia:'Data & Staff Hub', consumers:'Every manager hub, BD Dashboard (county caseload)', cadenceDays:7},
+  {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7},
+  {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
+  {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
+  {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Outcomes Dashboard still needs its own separate Demographics/Screeners/Forms uploads for caseload/screener-rate/PHQ-9 metrics; not centralized here yet.'},
+  {registryKey:'supervision_tracking', label:'Supervision Tracking Workbook', supaKey:'sup_import', uploadedVia:'Data & Staff Hub', consumers:'Data & Staff Hub (credential compliance)', cadenceDays:30},
+  {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
+  {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
+  {registryKey:'linkage_legacy_workbook', label:'Legacy Linkage Dashboard Workbook', supaKey:'linkage_data', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub (superseded by Pimsy Notes upload)', cadenceDays:null},
+  {registryKey:'director_pl', label:'QuickBooks P&L', supaKey:'director_financial, director_financial_history', uploadedVia:'Director Hub', consumers:'Director Hub, Executive Dashboard', cadenceDays:30, note:'Wired to this registry 9/15/26 — Director Hub now records an entry here on every P&L upload, same pattern as this hub’s own uploads.'},
+  {registryKey:'director_klip_pimsy', label:'Klip / Pimsy Unified Import', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Director Hub', consumers:'Director Hub', cadenceDays:7, note:'Wired to this registry 9/15/26 — Director Hub now records an entry here on every Klip/Pimsy upload, same pattern as this hub’s own uploads.'},
+  {registryKey:null, label:'BD Leads', supaKey:'bd_leads', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: ongoing manual add/edit/delete, not a periodic file upload — a freshness date doesn’t map onto this cleanly, so left untracked here on purpose.'},
+  {registryKey:null, label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: tab is still hidden/unused per Brandon (9/10/26) — not worth wiring up while dormant.'},
+  {registryKey:null, label:'Optum Referral Tracker', supaKey:'linkage_optum_stories (planned)', uploadedVia:'Not yet built', consumers:'BH Linkage Hub (planned)', cadenceDays:null, note:'Listed in the architecture doc as a planned import — no upload code for this exists anywhere in current source as of 9/14/26. Confirm with Brandon whether this still needs building.'},
+];
+function catalogFreshness(entry, cadenceDays){
+  if(!entry || !entry.uploaded_at) return {label:'Never uploaded', cls:'bad'};
+  const days = Math.floor((Date.now() - new Date(entry.uploaded_at).getTime())/86400000);
+  const when = days<=0 ? 'today' : `${days}d ago`;
+  if(cadenceDays==null) return {label:`Last: ${when}`, cls:'neutral'};
+  if(days <= cadenceDays) return {label:`Fresh · ${when}`, cls:'good'};
+  if(days <= cadenceDays*1.5) return {label:`Due · ${when}`, cls:'warn'};
+  return {label:`Overdue · ${when}`, cls:'bad'};
+}
+function catalogV(){
+  const clsColor={good:'#2d8c30',warn:'#a07e0a',bad:'#a52d6d',neutral:'#8089a8'};
+  const clsBg={good:'#dcf0dc',warn:'#fbf0c4',bad:'#f4dae8',neutral:'#eee9dc'};
+  const rows=DATA_CATALOG.map(d=>{
+    const entry=d.registryKey?S.impreg?.[d.registryKey]:null;
+    const fresh=d.registryKey?catalogFreshness(entry,d.cadenceDays):{label:'Not tracked here yet',cls:'neutral'};
+    const cadenceLbl=d.cadenceDays?`Every ${d.cadenceDays}d`:'Ongoing / ad hoc';
+    const who=entry?.uploaded_by?` · ${entry.uploaded_by}`:'';
+    const file=entry?.source_filename?` · ${entry.source_filename}`:'';
+    const noteRow=d.note?`<div style="font-size:11px;color:#8089a8;margin-top:3px;font-style:italic;max-width:340px">${d.note}</div>`:'';
+    return `<tr>
+      <td><div style="font-weight:600;color:#1a2861">${d.label}</div><div style="font-size:11px;color:#8089a8;font-family:'IBM Plex Mono',monospace">${d.supaKey}</div>${noteRow}</td>
+      <td style="font-size:12.5px;color:#3e4a78">${d.uploadedVia}</td>
+      <td style="font-size:12.5px;color:#3e4a78">${d.consumers}</td>
+      <td style="font-size:12.5px;color:#3e4a78;white-space:nowrap">${cadenceLbl}</td>
+      <td><span class="bdg" style="color:${clsColor[fresh.cls]};background:${clsBg[fresh.cls]}">${fresh.label}</span><div style="font-size:10.5px;color:#8089a8;margin-top:3px">${who}${file}</div></td>
+    </tr>`;
+  }).join('');
+  const trackedCount=DATA_CATALOG.filter(d=>d.registryKey && S.impreg?.[d.registryKey]).length;
+  return `<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+      <div>
+        <div style="font-weight:800;font-size:20px;color:#1a2861">🗂 Data Catalog</div>
+        <div style="font-size:12.5px;color:#3e4a78;margin-top:4px;max-width:620px">Every recurring dataset in the Thrive ecosystem — what it is, where it's uploaded, which hubs read it, how often it should be refreshed, and when it last actually was. ${trackedCount} of ${DATA_CATALOG.filter(d=>d.registryKey).length} datasets uploaded through this hub have a recorded upload so far; rows marked "Not tracked here yet" are uploaded in another hub and haven't been wired into this registry.</div>
+      </div>
+      <button class="btn-n" onclick="H.om('data')">↑ Upload Data</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="tbl-wrap">
+        <table class="tbl" style="min-width:900px">
+          <thead><tr><th>Dataset</th><th>Uploaded Via</th><th>Feeds</th><th>Expected Cadence</th><th>Last Upload</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#8089a8;margin-top:12px;line-height:1.6">Freshness is computed from each dataset's own expected cadence — "Fresh" means within cadence, "Due" is up to 1.5× cadence, "Overdue" is beyond that. Datasets with no fixed cadence (ongoing manual entry, or a one-off/legacy import) just show when they were last touched.</div>`;
+}
 
 function initStaff(){
   const def=SDEF.map(s=>({...s,status:s.status||'Active'}));
@@ -1077,6 +1167,7 @@ let S={
   // instead of a new upload's rows replacing the whole month and silently losing everything
   // an earlier upload contributed. See commitNotes() / mergeLinkageMonthRaw().
   linkageNotesRaw:lv('linkageNotesRaw',{}),
+  impreg:lv('impreg',{}),
 };
 let M={type:null,tab:'hours',prev:null,defMgr:''};
 
@@ -1848,7 +1939,8 @@ function renderHdr(){
   const isActive=(id)=>{if(id.startsWith('manager:'))return v==='manager'&&sm===id.split(':')[1];return v===id;};
   const GROUPS=[
     {label:'Data & Staff',items:[
-      {id:'settings',label:'Staff & Settings'}
+      {id:'settings',label:'Staff & Settings'},
+      {id:'catalog',label:'Data Catalog'}
     ]}
   ];
   const renderItem=(item)=>{const a=isActive(item.id);const click=item.id.startsWith('manager:')?`H.nav('manager','${item.id.split(':')[1]}')`:`H.nav('${item.id}')`;const dot=item.dot?`<span class="dot" style="background:${item.dot}"></span>`:'<span class="dot"></span>';const badge=item.b>0?`<span style="margin-left:auto;background:${item.btype==='bad'?'rgba(239,68,68,.9)':'rgba(245,158,11,.9)'};color:#fff;border-radius:10px;padding:0 6px;font-size:9.5px;font-weight:600;line-height:15px;font-family:'IBM Plex Mono',monospace">${item.b}</span>`:'';return`<button class="nav-item${a?' active':''}" onclick="${click}">${dot}<span style="flex:1">${item.label}</span>${badge}</button>`;};
@@ -1863,7 +1955,7 @@ function renderHdr(){
   ];
   const currentRole=ROLES.find(r=>r.key===S.role)||ROLES[0];
   const rBtns=ROLES.map(r=>`<button class="${S.role===r.key?'active':''}" onclick="H.setR('${r.key}')"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${r.color};margin-right:8px;vertical-align:middle"></span>${r.label} <span style="color:#8089a8;font-size:11px">· ${r.sub}</span></button>`).join('');
-  const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
+  const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='catalog'?'Data Catalog':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
   const hSrc=periodForField('hours'),cSrc=periodForField('caseload');const allDates=[hSrc,cSrc].filter(Boolean).sort();const latest=allDates[allDates.length-1]||S.period;function fmt(d){if(!d)return'No data imported yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
   document.getElementById('hdr').innerHTML=`
     <div class="ctx"><div class="where">${wherelabel}</div><span class="pill live">● Live</span></div>
@@ -1881,7 +1973,7 @@ function renderHdr(){
 }
 
 function renderV(){
-  const vs={vp:vpV,sarah:()=>dirV('Sarah'),manager:()=>mgrV(S.selMgr),renewals:renV,tasks:tskV,match:pmV,supervision:supV,resources:resV,settings:setV};
+  const vs={vp:vpV,sarah:()=>dirV('Sarah'),manager:()=>mgrV(S.selMgr),renewals:renV,tasks:tskV,match:pmV,supervision:supV,resources:resV,settings:setV,catalog:catalogV};
   document.getElementById('view').innerHTML=(vs[S.view]||vpV)();
   enhanceTables();
 }
@@ -3749,6 +3841,253 @@ async function parseLinkageDashboardWorkbook(buf){
   return {kpi, pipeline, sites, payers, g9009, outreach, communityTransition, weekly};
 }
 
+// ══════════════════════════════════════════════════════════
+// OUTCOMES DASHBOARD LEDGER BRIDGE (added 9/15/26, per Brandon's request to route as much
+// data as possible through this one upload surface instead of uploading the same export
+// twice). The same raw Pimsy Notes export already uploaded above for Linkage + Courts/Jail
+// (H.slotFileNotes/H.commitNotes) is ALSO fed here into Outcomes Dashboard's persistent
+// 'program_ledger' Supabase key — the same key outcomes.html already reads live on every
+// load via its own syncFromSupabase()+ledgerKpiOverride(), so Sessions/Revenue/Minutes
+// trend rows across every program refresh automatically next time anyone opens Outcomes
+// Dashboard, with no separate upload needed there for this piece.
+//
+// This is a faithful, unmodified port of outcomes.html's own parseNotes() +
+// mergeMonthlyNotesIntoLedger() + supporting helpers (H0038_RATE, PIMSY_DIV_MAP,
+// PIMSY_REF_MAP, mLabel, the ledger upsert/trend-month functions) — not a re-implementation.
+// "ol" (Outcomes Ledger) prefix so nothing here collides with this hub's own names, and so
+// a future diff against outcomes.html's real source is a straight compare, not a guess
+// about which copy drifted.
+//
+// Deliberately NOT ported: buildKpi()/applyAllToHub()'s per-program KPI computation (active
+// caseload, screener rate, PHQ-9 improvement %, county breakdown, etc.) — that logic is
+// tightly bound to Outcomes Dashboard's own PROGRAMS/CONTRACTS/ROLLUP display model and to
+// the Demographics/Screeners/Forms exports, none of which this hub has. Those metrics still
+// need their source files uploaded directly in Outcomes Dashboard for now — flagged in
+// data-ingestion-architecture.md as a separate, larger phase, not attempted here.
+const OL_H0038_RATE = 17.49;
+const OL_PIMSY_DIV_MAP = {
+  'SUD Community Services':'community',
+  'MH Community Services':'community',
+  'MH Community Linkage':'bh_linkage',
+  'MH Community Linkage ':'bh_linkage',
+  'SUD Community Linkage':'bh_linkage',
+  'Cuyahoga County Jail':'ccj',
+  'COSSAP/ Oriana':'orianna',
+  'OneOhio':'trumbull_jail',
+  'UH ACO':'hospital',
+  'ThriveED Program':'hospital',
+  'SOR Correctional Facility':'archived',
+};
+const OL_PIMSY_REF_MAP = {
+  'Metro Health - ER':'hospital','UH Cleveland Medical Center ED':'hospital',
+  'SVCH -ER':'hospital','MetroHealth Inpatient':'hospital',
+  'UH Parma ED':'hospital','UH Ahuja ED':'hospital',
+  'OSU ED':'hospital','OSU Wexner Medical':'hospital',
+  'OSU Talbot Hall':'hospital','CCF':'hospital','UH ACO':'hospital',
+  'Mt Carmel':'bh_linkage','Windsor Laurelwood':'bh_linkage',
+  'SunRise Vista':'bh_linkage','RiverVista ':'bh_linkage','RiverVista':'bh_linkage',
+  'Buckeye Community Linkage Program':'bh_linkage',
+  'Buckeye ':'bh_linkage','Buckeye':'bh_linkage',
+  'Sun Behavioral Health':'bh_linkage','Highland Springs':'bh_linkage',
+  'Cuyahoga County Jail':'ccj','Cuyahoga County ADC':'adc','MH-ADC':'adc',
+  'COSSAP/Oriana House':'orianna','Oriana House CSCBCF':'orianna',
+  'Trumbull County Jail':'trumbull_jail',
+  'Trumbull County Probation':'trumbull_prob',
+  "Trumbull County Women's Docket":'trumbull_prob',
+  'Trumbull County Family Court':'trumbull_fdd',
+  'CTP- Adam Lawrence Scioto':'als_ctp','CTP-Clark,Greene,Madison':'als_ctp',
+  'CTP-Warren and Clinton':'als_ctp',
+  'ALS SOS':'als_sos','Adams Lawrence Scioto':'als_sos',
+  'Lawrence Municipal Drug Court':'als_sos',
+  'Scioto County FDTC':'als_sos','FDTC Scioto County':'als_sos',
+  'Mended Reeds':'mended_reeds',
+  'Self/No Referral':'community','CareSource FUA':'community',
+  'Belmont Jail':'archived','Clark County Jail':'archived',
+  'MonDay Community Correctional Institution':'archived',
+  'West Central Correctional':'archived','ExAM':'archived',
+  'Warren County START':'archived','W/C You-Turn Recovery Docket':'archived',
+  "W/C SUCCESS/MH Docket ":'archived',
+};
+function olMLabel(d) {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt)) return null;
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getMonth()] + ' ' + String(dt.getFullYear()).slice(2);
+}
+function olComputeTrendMonths(anchorDate){
+  const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const months=[];
+  const now=anchorDate||new Date();
+  for(let i=11;i>=0;i--){
+    const d=new Date(now.getFullYear(), now.getMonth()-i, 1);
+    months.push(MONTH_ABBR[d.getMonth()]+' '+String(d.getFullYear()).slice(2));
+  }
+  return months;
+}
+function olLedgerMaxMonth(ledger){
+  const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthLabels = Object.keys(ledger.months||{}).map(k => k.split('||')[1]).filter(Boolean);
+  if (!monthLabels.length) return new Date();
+  let maxD = null;
+  monthLabels.forEach(m => {
+    const parts = m.split(' ');
+    if (parts.length !== 2) return;
+    const mi = MONTH_ABBR.indexOf(parts[0]);
+    if (mi < 0) return;
+    const yr = 2000 + parseInt(parts[1], 10);
+    const d = new Date(yr, mi, 1);
+    if (!maxD || d > maxD) maxD = d;
+  });
+  return maxD || new Date();
+}
+function olLedgerUpsertMonth(ledger, pk, monthLabel, sessions, revenue, clientIdSet, minutes, newReferralSrc){
+  const key = pk+'||'+monthLabel;
+  const prev = ledger.months[key] || {};
+  ledger.months[key] = { ...prev, sessions, revenue, clientCount: clientIdSet ? clientIdSet.size : 0,
+    minutes: minutes!==undefined ? minutes : prev.minutes,
+    newReferralSrc: newReferralSrc!==undefined ? newReferralSrc : prev.newReferralSrc };
+  if (clientIdSet && clientIdSet.size){
+    if (!ledger.clientsSeen[pk]) ledger.clientsSeen[pk] = [];
+    const seen = new Set(ledger.clientsSeen[pk]);
+    clientIdSet.forEach(id => seen.add(id));
+    ledger.clientsSeen[pk] = [...seen];
+  }
+}
+// Straight port of outcomes.html's parseNotes(), minus the clientMap-driven pathway lookup
+// (Demographics isn't uploaded here, so that lookup is always empty — same fallback path
+// Outcomes Dashboard itself already uses whenever Notes is uploaded without Demographics).
+function olParseNotes(rows, trendMonths) {
+  function bCode(raw) { const m=(raw||'').match(/\(([^)]+)\)/); return m?m[1].trim():''; }
+  function estRev(row, pk) {
+    const bill = row['Billable'];
+    if (!bill && bill !== true && bill !== 1 && String(bill).toLowerCase() !== 'true') return 0;
+    const code = bCode(row['Billing Code'] || '');
+    const units = parseInt(row['Units Used']) || 0;
+    if (/^H0038/.test(code)) return units * OL_H0038_RATE;
+    return 0;
+  }
+  const progs = {};
+  const pGet = k => {
+    if (!progs[k]) progs[k] = {
+      clients:new Set(), activeCl:new Set(),
+      sudCl:new Set(), mhCl:new Set(),
+      sessions:0, billable:0, minutes:0, revenue:0, f2f:0,
+      mSessions:{}, mClients:{}, mNewAdm:{}, mRevenue:{}, mMinutes:{}, mNewReferralSrc:{},
+      firstSeen:{}, firstSeenSrc:{}, firstBillable:{}, admitDateByClient:{}, payers:{}, staff:{}
+    };
+    return progs[k];
+  };
+  let minD=null, maxD=null;
+  const unmapped = new Set();
+  const CTP_STAFF = ['Mario Ybarbo'];
+  const seenNoteIds = new Set();
+  for (const r of rows) {
+    const noteNum = r['Note #'];
+    if (noteNum) {
+      if (seenNoteIds.has(noteNum)) continue;
+      seenNoteIds.add(noteNum);
+    }
+    const div      = (r['Division'] || '').trim();
+    const performer= (r['Performed By'] || '').trim();
+    const noteType = (r['Note Type'] || '').trim();
+    const refSrc   = (r['Referral Source'] || '').trim();
+    const clientNum= r['Client #'];
+    const isCTP = CTP_STAFF.includes(performer) || noteType === 'CTP Care Coordination';
+    let pk = (OL_PIMSY_REF_MAP[refSrc] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP[div]));
+    if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
+    const p = pGet(pk);
+    const svcD = r['Service Date'];
+    const d = svcD instanceof Date ? svcD : (svcD ? new Date(svcD) : null);
+    const ml = olMLabel(d);
+    if (d && !isNaN(d)) { if (!minD||d<minD) minD=d; if (!maxD||d>maxD) maxD=d; }
+    if (clientNum) {
+      p.clients.add(clientNum);
+      const active = r['Client Active'];
+      if (active===true||active===1||String(active).toLowerCase()==='true') p.activeCl.add(clientNum);
+      if (div==='SUD Community Services'||refSrc==='Self/No Referral') p.sudCl.add(clientNum);
+      if (div==='MH Community Services') p.mhCl.add(clientNum);
+      if (!p.firstSeen[clientNum]||(d&&!isNaN(d)&&d<p.firstSeen[clientNum])) { p.firstSeen[clientNum]=d; p.firstSeenSrc[clientNum]=refSrc||'Unknown'; }
+    }
+    p.sessions++;
+    const bill = r['Billable'];
+    if (bill===true||bill===1||String(bill).toLowerCase()==='true') {
+      p.billable++;
+      if (clientNum && d && !isNaN(d) && (!p.firstBillable[clientNum]||d<p.firstBillable[clientNum])) p.firstBillable[clientNum]=d;
+    }
+    const rowMinutes = parseInt(r['Duration in Minutes']) || 0;
+    p.minutes += rowMinutes;
+    const rowRev = estRev(r, pk);
+    p.revenue += rowRev;
+    const f2f = r['Face to Face'];
+    if (f2f===true||f2f===1||String(f2f).toLowerCase()==='true') p.f2f++;
+    if (ml && trendMonths.includes(ml)) {
+      p.mSessions[ml] = (p.mSessions[ml] || 0) + 1;
+      p.mRevenue[ml] = (p.mRevenue[ml] || 0) + rowRev;
+      p.mMinutes[ml] = (p.mMinutes[ml] || 0) + rowMinutes;
+      if (clientNum) { if (!p.mClients[ml]) p.mClients[ml]=new Set(); p.mClients[ml].add(clientNum); }
+    }
+    const payer = (r['Insurance Co.'] || 'Unknown').trim();
+    p.payers[payer] = (p.payers[payer] || 0) + 1;
+    const staff = (r['Performed By'] || '').trim();
+    if (staff) {
+      if (!p.staff[staff]) p.staff[staff]={sessions:0,clients:new Set(),billable:0};
+      p.staff[staff].sessions++;
+      if (clientNum) p.staff[staff].clients.add(clientNum);
+      if (bill===true||bill===1||String(bill).toLowerCase()==='true') p.staff[staff].billable++;
+    }
+  }
+  for (const p of Object.values(progs)) {
+    for (const [cid,fd] of Object.entries(p.firstSeen)) {
+      const ml = olMLabel(fd);
+      if (ml && trendMonths.includes(ml)) {
+        p.mNewAdm[ml] = (p.mNewAdm[ml] || 0) + 1;
+        const src = p.firstSeenSrc[cid] || 'Unknown';
+        if (!p.mNewReferralSrc[ml]) p.mNewReferralSrc[ml] = {};
+        p.mNewReferralSrc[ml][src] = (p.mNewReferralSrc[ml][src] || 0) + 1;
+      }
+    }
+  }
+  return { progs, minD, maxD, unmapped:[...unmapped], total:rows.length };
+}
+// Converts the array-of-arrays rows this hub already extracted for the Linkage/Courts
+// parsers (header row first) into the array-of-objects shape olParseNotes() (and outcomes.html's
+// own parseNotes()) expect — row['Service Date'], row['Division'], etc.
+function olRowsToObjects(rows){
+  if(!rows || !rows.length) return [];
+  const hdr = rows[0].map(h=>String(h||'').trim());
+  return rows.slice(1).filter(r=>r && r.length).map(r=>{
+    const o={};
+    hdr.forEach((h,i)=>{ if(h) o[h]=r[i]; });
+    return o;
+  });
+}
+// Pulls the live 'program_ledger' row straight from Supabase (not through this hub's own
+// sv()/lv() localStorage cache, since this hub never displays the ledger itself — it's purely
+// relaying data Outcomes Dashboard owns), merges this upload's months in, and writes it
+// straight back. Safe to re-run: ledgerUpsertMonth() overwrites by pk+month, so uploading the
+// same or an overlapping month again never double-counts.
+async function olMergeNotesIntoProgramLedger(objRows){
+  const rows = await db.get('appdata', 'key=eq.program_ledger');
+  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}};
+  if(rows && rows[0] && rows[0].value){
+    try{ ledger = JSON.parse(rows[0].value); }catch(e){}
+  }
+  const trendMonths = olComputeTrendMonths(olLedgerMaxMonth(ledger));
+  const parsed = olParseNotes(objRows, trendMonths);
+  Object.entries(parsed.progs).forEach(([pk, p]) => {
+    Object.keys(p.mSessions||{}).forEach(month => {
+      const sess = p.mSessions[month] || 0;
+      const rev  = Math.round((p.mRevenue && p.mRevenue[month]) || 0);
+      const clientSet = p.mClients[month] || new Set();
+      const minutes = (p.mMinutes && p.mMinutes[month]) || 0;
+      const newReferralSrc = (p.mNewReferralSrc && p.mNewReferralSrc[month]) || undefined;
+      olLedgerUpsertMonth(ledger, pk, month, sess, rev, clientSet, minutes, newReferralSrc);
+    });
+  });
+  const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
+  return { ok: !!saved, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
+}
+
 const H={
   nav(v,m){S.view=v;if(m)S.selMgr=m;M.type=null;sv('view',v);sv('selMgr',S.selMgr);render();},
   setR(role){S.role=role;sv('role',role);const m=document.getElementById('rm');if(m)m.style.display='none';this.nav('settings');},
@@ -4106,6 +4445,7 @@ async delSRow(enc){
       });
       S.period=latestKey;sv('pp',latestKey);
       sv('p',S.pd);
+      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey});
       M.prev=null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Imported ${totalN} record${totalN!==1?'s':''} across ${chosen.length} period${chosen.length!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -4126,6 +4466,7 @@ async delSRow(enc){
       });
       S.period=latestKey;sv('pp',latestKey);
       sv('p',S.pd);
+      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey});
       M.prev=null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Imported ${totalN} record${totalN!==1?'s':''} across ${prev.periods.length} period${prev.periods.length!==1?'s':''} (read directly from tab names)`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -4151,12 +4492,14 @@ async delSRow(enc){
     S.period=period;sv('pp',period);
     sv('p',S.pd);
     const n=prev.matched.length;
+    recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:n, period_label:period});
     M.prev=null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} record${n!==1?'s':''} for ${period}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
   slotFileSup(inp){
     const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
     if(/\.xlsx?$/i.test(f.name)){
       const r=new FileReader();
       r.onload=async e=>{
@@ -4182,6 +4525,7 @@ async delSRow(enc){
   },
   slotFileHosp(inp){
     const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
     if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); return; }
     const r=new FileReader();
     r.onload=async e=>{
@@ -4206,12 +4550,14 @@ async delSRow(enc){
     S.hospData = M.prevHosp;
     sv('hospData', S.hospData);
     const n = M.prevHosp.totalEncounters;
+    recordImport('hospital_outcomes', {row_count:n});
     M.prevHosp = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} hospital encounter${n!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
   slotFileLinkage(inp){
     const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
     if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); return; }
     const r=new FileReader();
     r.onload=async e=>{
@@ -4228,6 +4574,7 @@ async delSRow(enc){
     if(!M.prevLinkage || M.prevLinkage.error) return;
     S.linkageData = {...M.prevLinkage, importedAt:new Date().toISOString()};
     sv('linkageData', S.linkageData);
+    recordImport('linkage_legacy_workbook', {});
     M.prevLinkage=null;
     render();
     const t=document.createElement('div');t.textContent='✓ Imported Linkage dashboard data';t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
@@ -4262,6 +4609,7 @@ async delSRow(enc){
     S.supImport=imp;
     sv('supimp',S.supImport);
     const n=prev.matched.length;
+    recordImport('supervision_tracking', {row_count:n});
     M.prevSup=null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} supervision record${n!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
@@ -4278,6 +4626,7 @@ async delSRow(enc){
     // just the thin Weekly Trends aggregate — so it's checked FIRST, before falling back to the
     // Weekly-Trends-only backfill for workbooks that don't have anything this granular.
     const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
     if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx file directly.'); return; }
     const r=new FileReader();
     r.onload=async e=>{
@@ -4298,7 +4647,7 @@ async delSRow(enc){
           if(notesRows) break;
         }
         if(notesRows){
-          M.prevNotes = { linkage: parseLinkageNotesExport(notesRows), courts: parseCourtsJailNotesExport(notesRows) };
+          M.prevNotes = { linkage: parseLinkageNotesExport(notesRows), courts: parseCourtsJailNotesExport(notesRows), rawRows: notesRows };
         }else{
           const backfillMonths = await parseLinkageHistoryBackfill(e.target.result);
           const newKeys = Object.keys(backfillMonths).filter(k=>!(S.linkageHistory||{})[k]);
@@ -4320,6 +4669,7 @@ async delSRow(enc){
       p.backfillNew.forEach(key=>{ S.linkageHistory[key] = {...p.backfill[key], importedAt:new Date().toISOString()}; });
       sv('linkageHistory', S.linkageHistory);
       const n = p.backfillNew.length;
+      recordImport('pimsy_notes', {row_count:n, period_label:p.backfillNew.slice().sort().pop()||null});
       M.prevNotes = null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Backfilled ${n} historical month${n!==1?'s':''}${p.backfillSkip.length?` (skipped ${p.backfillSkip.length} already on file)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
@@ -4389,6 +4739,26 @@ async delSRow(enc){
       if(latestPeriod){ S.period = latestPeriod; sv('pp', latestPeriod); }
       sv('p', S.pd);
     }
+    recordImport('pimsy_notes', {row_count:(lkMonthCount-lkSkipped)+courtsN, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+    // Outcomes Dashboard ledger bridge — same raw file, no separate upload needed there for
+    // Sessions/Revenue/Minutes. Fire-and-forget relative to the Linkage/Courts commit above
+    // (which is already done and rendered by this point) so a slow/failed Supabase round trip
+    // here never blocks or rolls back the primary import; a failure surfaces its own toast
+    // instead. See the OUTCOMES DASHBOARD LEDGER BRIDGE block above for what this deliberately
+    // does and doesn't cover.
+    if(p.rawRows && p.rawRows.length){
+      const objRows = olRowsToObjects(p.rawRows);
+      olMergeNotesIntoProgramLedger(objRows).then(res=>{
+        if(res.ok){
+          recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+        }else{
+          showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger failed to save — its Sessions/Revenue trends will still show old data until this succeeds. Try re-uploading this file.');
+        }
+      }).catch(err=>{
+        console.error('[olMergeNotesIntoProgramLedger]', err);
+        showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger hit an error — see console.');
+      });
+    }
     M.prevNotes = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported Linkage (${lkMonthCount-lkSkipped} month${lkMonthCount-lkSkipped!==1?'s':''}${lkSkipped?`, ${lkSkipped} skipped — already on file`:''}) + ${courtsN} Courts/Jail record${courtsN!==1?'s':''} across ${courtsMonthCount} month${courtsMonthCount!==1?'s':''}${ctSkipped?` (${ctSkipped} skipped)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -4420,7 +4790,7 @@ async delSRow(enc){
     if(!okH || !okD){ showSaveError(`Recompute finished locally but failed to save to Supabase — try again, and check your connection if it keeps failing.`); return; }
     const t=document.createElement('div');t.textContent=`✓ Recomputed ${keys.length} month${keys.length!==1?'s':''} — full U1–U9 breakdown now on file`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
   },
-  slotFile(slotId,inp){const f=inp.files[0];if(!f)return;const tabMap={productivity:'hours',engagement:'caseload',lateNotes:'lateNotes',courtsBilling:'clients'};M.tab=tabMap[slotId]||slotId;M.slotId=slotId;if(slotId==='engagement'){importEngagementFile(f);return;}if(slotId==='lateNotes'&&/\.xlsx?$/i.test(f.name)){importLateNotesFile(f);return;}if(slotId==='courtsBilling'){this.rfCourts(f);return;}this.rf(f);},
+  slotFile(slotId,inp){const f=inp.files[0];if(!f)return;S._lastFile=f.name;const tabMap={productivity:'hours',engagement:'caseload',lateNotes:'lateNotes',courtsBilling:'clients'};M.tab=tabMap[slotId]||slotId;M.slotId=slotId;if(slotId==='engagement'){importEngagementFile(f);return;}if(slotId==='lateNotes'&&/\.xlsx?$/i.test(f.name)){importLateNotesFile(f);return;}if(slotId==='courtsBilling'){this.rfCourts(f);return;}this.rf(f);},
   rfCourts(f){
     const isXlsx=/\.xlsx?$/i.test(f.name);
     if(isXlsx){
@@ -4523,7 +4893,7 @@ async delSRow(enc){
     M.type=null;
     render();
   },
-  slotFileRen(inp){const f=inp.files[0];if(!f)return;readFileSmart(f,txt=>this.parseRenText(txt));},
+  slotFileRen(inp){const f=inp.files[0];if(!f)return;S._lastFile=f.name;readFileSmart(f,txt=>this.parseRenText(txt));},
   // Destructive reset for when old records imported under the pre-fix column-parsing bug have
   // garbled Client ID/Renewal Type/date values that don't share an update-matching key with a
   // fresh correct import — those never get cleaned up by re-importing on their own. Wiping and
@@ -4722,6 +5092,7 @@ async delSRow(enc){
       return;
     }
     S.renewals=nextRenewals;
+    recordImport('renewals_workbook', {row_count:nImport+nUpdate});
     M.prevRen=null;render();
     const t=document.createElement('div');t.textContent=`✓ Applied ${nImport+nUpdate} change${(nImport+nUpdate)!==1?'s':''} (${nImport} new, ${nUpdate} updated) — saved`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
