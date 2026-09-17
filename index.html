@@ -1042,9 +1042,29 @@ function recordImport(datasetKey, meta){
     source_filename: meta.source_filename || S._lastFile || null,
     row_count: (typeof meta.row_count === 'number') ? meta.row_count : null,
     period_label: meta.period_label || null,
+    // Added 9/16/26 per Brandon's request: the actual latest date of DATA this upload
+    // covers, distinct from uploaded_at (when someone clicked upload). Lets whoever's
+    // doing the next upload see at a glance where the last one left off, instead of
+    // guessing from the upload timestamp alone. Format varies by dataset (a real date,
+    // a month, or a period-tab label) — fmtDataThrough() below normalizes for display.
+    // null for datasets that aren't date-ranged data at all (e.g. Renewals, which is a
+    // current-state snapshot, not a time series) — those intentionally show '—'.
+    data_through: meta.data_through || null,
   };
   S.impreg = {...(S.impreg||{}), [datasetKey]: entry};
   sv('impreg', S.impreg);
+}
+// Normalizes the several date-ish shapes data_through can arrive in (a plain
+// YYYY-MM-DD, a YYYY-MM month, or an already-human label like "Jun 2026" or a
+// period-tab string) into one consistent display string.
+function fmtDataThrough(v){
+  if(!v) return '—';
+  const s=String(v).trim();
+  let m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(m){ const d=new Date(+m[1],+m[2]-1,+m[3]); return isNaN(d)?s:d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+  m=s.match(/^(\d{4})-(\d{2})$/);
+  if(m){ const d=new Date(+m[1],+m[2]-1,1); return isNaN(d)?s:d.toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
+  return s;
 }
 // Static catalog of every known recurring dataset across the ecosystem — not just the ones
 // this hub uploads. registryKey ties a row to a real recordImport() entry (real freshness);
@@ -1057,7 +1077,7 @@ const DATA_CATALOG = [
   {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7},
   {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
   {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
-  {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Outcomes Dashboard still needs its own separate Demographics/Screeners/Forms uploads for caseload/screener-rate/PHQ-9 metrics; not centralized here yet.'},
+  {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes + Client Sets)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26; client sets added 9/16/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup; Active Caseload/Total Admitted for Community + CCJ, live as of 9/16/26)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed on the Outcomes Dashboard side against live sli_assessments, joined to the client set this row provides. Outcomes Dashboard still needs its own separate Demographics upload for county/race/insurance/housing/employment breakdowns — no live equivalent exists anywhere yet.'},
   {registryKey:'supervision_tracking', label:'Supervision Tracking Workbook', supaKey:'sup_import', uploadedVia:'Data & Staff Hub', consumers:'Data & Staff Hub (credential compliance)', cadenceDays:30},
   {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
   {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
@@ -1087,12 +1107,14 @@ function catalogV(){
     const who=entry?.uploaded_by?` · ${entry.uploaded_by}`:'';
     const file=entry?.source_filename?` · ${entry.source_filename}`:'';
     const noteRow=d.note?`<div style="font-size:11px;color:#8089a8;margin-top:3px;font-style:italic;max-width:340px">${d.note}</div>`:'';
+    const dataThrough=d.registryKey?fmtDataThrough(entry?.data_through):'—';
     return `<tr>
       <td><div style="font-weight:600;color:#1a2861">${d.label}</div><div style="font-size:11px;color:#8089a8;font-family:'IBM Plex Mono',monospace">${d.supaKey}</div>${noteRow}</td>
       <td style="font-size:12.5px;color:#3e4a78">${d.uploadedVia}</td>
       <td style="font-size:12.5px;color:#3e4a78">${d.consumers}</td>
       <td style="font-size:12.5px;color:#3e4a78;white-space:nowrap">${cadenceLbl}</td>
       <td><span class="bdg" style="color:${clsColor[fresh.cls]};background:${clsBg[fresh.cls]}">${fresh.label}</span><div style="font-size:10.5px;color:#8089a8;margin-top:3px">${who}${file}</div></td>
+      <td style="font-size:12.5px;color:#1a2861;font-weight:600;white-space:nowrap">${dataThrough}</td>
     </tr>`;
   }).join('');
   const trackedCount=DATA_CATALOG.filter(d=>d.registryKey && S.impreg?.[d.registryKey]).length;
@@ -1106,7 +1128,7 @@ function catalogV(){
     <div class="card" style="padding:0;overflow:hidden">
       <div class="tbl-wrap">
         <table class="tbl" style="min-width:900px">
-          <thead><tr><th>Dataset</th><th>Uploaded Via</th><th>Feeds</th><th>Expected Cadence</th><th>Last Upload</th></tr></thead>
+          <thead><tr><th>Dataset</th><th>Uploaded Via</th><th>Feeds</th><th>Expected Cadence</th><th>Last Upload</th><th>Data Through</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -1793,10 +1815,15 @@ function modH(){
     const freshHours=periodForField('hours'),freshCase=periodForField('caseload');
     const fmtFresh=(d)=>{if(!d)return'nothing on file yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});};
     const fmtFreshTs=(iso)=>{if(!iso)return'nothing on file yet';const dt=new Date(iso);if(isNaN(dt))return'nothing on file yet';return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' at '+dt.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});};
+    // Data Through here means the actual latest date/period the data ITSELF covers (per
+    // recordImport's data_through, added 9/16/26) — not when someone clicked upload. That's
+    // the number that tells you where the next upload needs to pick up from.
+    const dtFor=k=>fmtDataThrough(S.impreg&&S.impreg[k]&&S.impreg[k].data_through);
     const freshnessBar=`<div style="font-size:11.5px;color:#3e4a78;background:#fff;border:1px solid #e6dfd2;border-radius:6px;padding:9px 13px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:6px 18px">
       <span>🕐 <strong>Productivity (Hours/Caseload):</strong> ${fmtFresh(freshCase||freshHours)}</span>
-      <span><strong>Pimsy Notes (Linkage + Courts/Jail):</strong> ${fmtFreshTs(S.linkageData&&S.linkageData.importedAt)}</span>
-      <span style="color:#8089a8">Hospital JotForm data is tracked separately in the Hospital Hub.</span>
+      <span><strong>Pimsy Notes (Linkage + Courts/Jail):</strong> data through ${dtFor('pimsy_notes')} <span style="color:#8089a8">(uploaded ${fmtFreshTs(S.linkageData&&S.linkageData.importedAt)})</span></span>
+      <span><strong>Hospital Outcomes:</strong> data through ${dtFor('hospital_outcomes')}</span>
+      <span><strong>Supervision:</strong> latest month on file ${dtFor('supervision_tracking')}</span>
     </div>`;
     body=`<div style="font-weight:800;font-size:15px;color:#1a2861;margin-bottom:4px">↑ Enter Period Data</div>
     <div style="font-size:12px;color:#3e4a78;margin-bottom:10px">Upload files to populate staff metrics. Data is shared across all directors and managers via Supabase.</div>
@@ -3864,6 +3891,17 @@ async function parseLinkageDashboardWorkbook(buf){
 // the Demographics/Screeners/Forms exports, none of which this hub has. Those metrics still
 // need their source files uploaded directly in Outcomes Dashboard for now — flagged in
 // data-ingestion-architecture.md as a separate, larger phase, not attempted here.
+//
+// PHASE 2 ADDED 9/16/26 (live-metrics migration, approved by Brandon): olParseNotes() already
+// builds a per-program clients/activeCl/sudCl/mhCl Set from this same upload — it just wasn't
+// being persisted anywhere. This upload now also writes a `clientSetsCurrent` snapshot into
+// program_ledger (below), so Outcomes Dashboard can read live Active Caseload/Total Admitted
+// straight from Supabase instead of needing its own separate Notes upload. This is a snapshot,
+// not a cumulative merge — same semantics as Outcomes Dashboard's own buildKpi(), where "Total
+// Admitted"/"Active + Assigned" always reflect whichever Notes file was uploaded most recently,
+// not a running total. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed entirely
+// on the Outcomes Dashboard side (against live `sli_assessments`, joined to this client set) —
+// nothing screener-related is added here, since this hub has no assessment data to contribute.
 const OL_H0038_RATE = 17.49;
 const OL_PIMSY_DIV_MAP = {
   'SUD Community Services':'community',
@@ -4068,10 +4106,11 @@ function olRowsToObjects(rows){
 // same or an overlapping month again never double-counts.
 async function olMergeNotesIntoProgramLedger(objRows){
   const rows = await db.get('appdata', 'key=eq.program_ledger');
-  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}};
+  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}, clientSetsCurrent:{}};
   if(rows && rows[0] && rows[0].value){
     try{ ledger = JSON.parse(rows[0].value); }catch(e){}
   }
+  if (!ledger.clientSetsCurrent) ledger.clientSetsCurrent = {};
   const trendMonths = olComputeTrendMonths(olLedgerMaxMonth(ledger));
   const parsed = olParseNotes(objRows, trendMonths);
   Object.entries(parsed.progs).forEach(([pk, p]) => {
@@ -4083,6 +4122,20 @@ async function olMergeNotesIntoProgramLedger(objRows){
       const newReferralSrc = (p.mNewReferralSrc && p.mNewReferralSrc[month]) || undefined;
       olLedgerUpsertMonth(ledger, pk, month, sess, rev, clientSet, minutes, newReferralSrc);
     });
+    // PHASE 2 (9/16/26): snapshot this upload's per-program client sets — Total Admitted
+    // (clients), Active Caseload (activeCl), and the SUD/MH split community's dashboard
+    // needs. Overwritten wholesale on every upload (not merged), matching how Outcomes
+    // Dashboard's own buildKpi() has always treated "hub period" — the range covered by
+    // whatever Notes file was uploaded most recently, not a running lifetime total.
+    ledger.clientSetsCurrent[pk] = {
+      clients: [...p.clients],
+      activeCl: [...p.activeCl],
+      sudCl: [...p.sudCl],
+      mhCl: [...p.mhCl],
+      periodStart: parsed.minD ? parsed.minD.toISOString() : null,
+      periodEnd: parsed.maxD ? parsed.maxD.toISOString() : null,
+      uploadedAt: new Date().toISOString(),
+    };
   });
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
   return { ok: !!saved, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
@@ -4445,7 +4498,7 @@ async delSRow(enc){
       });
       S.period=latestKey;sv('pp',latestKey);
       sv('p',S.pd);
-      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey});
+      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey, data_through:latestKey});
       M.prev=null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Imported ${totalN} record${totalN!==1?'s':''} across ${chosen.length} period${chosen.length!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -4466,7 +4519,7 @@ async delSRow(enc){
       });
       S.period=latestKey;sv('pp',latestKey);
       sv('p',S.pd);
-      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey});
+      recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:totalN, period_label:latestKey, data_through:latestKey});
       M.prev=null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Imported ${totalN} record${totalN!==1?'s':''} across ${prev.periods.length} period${prev.periods.length!==1?'s':''} (read directly from tab names)`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -4492,7 +4545,7 @@ async delSRow(enc){
     S.period=period;sv('pp',period);
     sv('p',S.pd);
     const n=prev.matched.length;
-    recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:n, period_label:period});
+    recordImport({hours:'roster_hours',caseload:'roster_caseload',lateNotes:'roster_late_notes',clients:'courts_billing'}[field]||('roster_'+field), {row_count:n, period_label:period, data_through:period});
     M.prev=null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} record${n!==1?'s':''} for ${period}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
@@ -4550,7 +4603,7 @@ async delSRow(enc){
     S.hospData = M.prevHosp;
     sv('hospData', S.hospData);
     const n = M.prevHosp.totalEncounters;
-    recordImport('hospital_outcomes', {row_count:n});
+    recordImport('hospital_outcomes', {row_count:n, data_through:M.prevHosp.period||null});
     M.prevHosp = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} hospital encounter${n!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
@@ -4609,7 +4662,11 @@ async delSRow(enc){
     S.supImport=imp;
     sv('supimp',S.supImport);
     const n=prev.matched.length;
-    recordImport('supervision_tracking', {row_count:n});
+    // Best-effort "latest month on this tracking sheet" — supervision data is a
+    // completed Y/N grid per credential/month, not date-stamped rows, so this is
+    // the closest real equivalent to a data-through date for this dataset.
+    const supMonths=[...new Set(prev.matched.map(r=>r.month).filter(Boolean))].sort();
+    recordImport('supervision_tracking', {row_count:n, data_through:supMonths.length?supMonths[supMonths.length-1]:null});
     M.prevSup=null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} supervision record${n!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
@@ -4669,7 +4726,7 @@ async delSRow(enc){
       p.backfillNew.forEach(key=>{ S.linkageHistory[key] = {...p.backfill[key], importedAt:new Date().toISOString()}; });
       sv('linkageHistory', S.linkageHistory);
       const n = p.backfillNew.length;
-      recordImport('pimsy_notes', {row_count:n, period_label:p.backfillNew.slice().sort().pop()||null});
+      recordImport('pimsy_notes', {row_count:n, period_label:p.backfillNew.slice().sort().pop()||null, data_through:p.backfillNew.slice().sort().pop()||null});
       M.prevNotes = null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Backfilled ${n} historical month${n!==1?'s':''}${p.backfillSkip.length?` (skipped ${p.backfillSkip.length} already on file)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
@@ -4739,7 +4796,7 @@ async delSRow(enc){
       if(latestPeriod){ S.period = latestPeriod; sv('pp', latestPeriod); }
       sv('p', S.pd);
     }
-    recordImport('pimsy_notes', {row_count:(lkMonthCount-lkSkipped)+courtsN, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+    recordImport('pimsy_notes', {row_count:(lkMonthCount-lkSkipped)+courtsN, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null, data_through:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
     // Outcomes Dashboard ledger bridge — same raw file, no separate upload needed there for
     // Sessions/Revenue/Minutes. Fire-and-forget relative to the Linkage/Courts commit above
     // (which is already done and rendered by this point) so a slow/failed Supabase round trip
@@ -4750,7 +4807,7 @@ async delSRow(enc){
       const objRows = olRowsToObjects(p.rawRows);
       olMergeNotesIntoProgramLedger(objRows).then(res=>{
         if(res.ok){
-          recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+          recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null, data_through:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
         }else{
           showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger failed to save — its Sessions/Revenue trends will still show old data until this succeeds. Try re-uploading this file.');
         }
