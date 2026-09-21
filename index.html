@@ -741,7 +741,23 @@ async function syncFromSupabase(){
       };
       const backfilled=staff.map(s=>({...s,...seedDefaults(s)}));
       const savedIds=new Set(staff.map(s=>s.id));
-      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id));
+      // FIX (9/21, per recurring "staff/renewals broken again" reports from Community/Courts
+      // managers — Rachel, Jessica, and others): root-caused to THIS merge. Its comment above
+      // explains the original intent (a brand-new SDEF hire not yet pushed to Supabase shouldn't
+      // vanish), but it can't tell "not yet synced" apart from "deliberately deleted" — delS()
+      // permanently removes someone from canonical Supabase (freeing their Pimsy ID), but their
+      // row is still sitting right here in the SDEF array baked into whatever version of this
+      // file is currently deployed. Every single load of this hub was re-adding every such
+      // deleted person back into S.staff, then the sv('s',...) two lines down immediately wrote
+      // that resurrected row straight back into the shared 'staff' key — un-doing the delete for
+      // every OTHER hub (Community, Courts, Hospital) too, the moment anyone merely opened this
+      // page. That's why it kept "breaking again" with no obvious trigger: no edit was needed,
+      // just someone loading Data & Staff Hub. staff_deleted_ids (written by delS() below) is the
+      // tombstone that lets this distinguish the two cases — a deleted id is now excluded here
+      // instead of silently re-added.
+      const deletedIds=new Set([...(S.deletedIds||[]), ...(parse('staff_deleted_ids')||[])]);
+      S.deletedIds=[...deletedIds]; sv('delids',S.deletedIds); // keep this browser's tombstone cache current too
+      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id)&&!deletedIds.has(s.id));
       S.staff = missingFromDefault.length ? [...backfilled, ...missingFromDefault] : backfilled;
       sv('s',S.staff);
     }
@@ -1002,7 +1018,7 @@ const RESOURCE_LINKS=[
 // just an opt-in for callers that need to know the real result.
 async function sv(k,v){
   try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
-  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry'};
+  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry','delids':'staff_deleted_ids'};
   if(sharedKeys[k]&&typeof db!=='undefined'&&SB_KEY.length>50){
     const saved = await db.upsert('appdata',{key:sharedKeys[k],value:JSON.stringify(v)},'key');
     if(!saved){
@@ -1141,7 +1157,12 @@ function initStaff(){
   const saved=lv('s',null);
   if(!saved)return def;
   const savedIds=new Set(saved.map(s=>s.id));
-  const added=def.filter(s=>!savedIds.has(s.id));
+  // FIX (9/21): exclude anyone permanently deleted (see delS()) from the SDEF-vs-cache add-back
+  // below — see syncFromSupabase()'s matching fix for the full explanation. This is the
+  // localStorage-only bootstrap value used for the instant before syncFromSupabase() re-checks
+  // against the live tombstone, so it's a best-effort pass using whatever this browser last knew.
+  const deletedIds=new Set(lv('delids',[]));
+  const added=def.filter(s=>!savedIds.has(s.id)&&!deletedIds.has(s.id));
   return added.length?[...saved,...added]:saved;
 }
 
@@ -1172,6 +1193,9 @@ let S={
   dirSel:(()=>{const d=lv('dirSel',{Sarah:'all'});if(d.Sarah==='Brian')d.Sarah='all';return d;})(),
   role:lv('role','Brandon'),
   staff:initStaff(),
+  // FIX (9/21): tombstone of Pimsy IDs permanently removed via delS()/delSRow() below — see the
+  // note at syncFromSupabase()'s SDEF merge for the bug this closes (deleted staff "coming back").
+  deletedIds:lv('delids',[]),
   pd:lv('p',{}), up:lv('up',{}), upAt:lv('upAt',{}), renewals:lv('r',[]), tasks:lv('t',[]),
   noteLogs:lv('nlogs',{}), casAudit:lv('casAudit',{}),
   tgt:lv('g',DTGT), period:lv('pp','2026-04-11'),
@@ -4289,6 +4313,17 @@ async delS(id){
     renderV();
     showSaveError(`Couldn't delete ${staff.fn} ${staff.ln} — nothing was changed. Try again, and check your connection if it keeps failing.`);
     return;
+  }
+  // FIX (9/21): record this id as permanently deleted — see syncFromSupabase()'s tombstone note.
+  // Without this, the very next page load (by anyone, in this hub) would re-add ${staff.fn}
+  // ${staff.ln} right back in from the SDEF array below and re-save that over the delete, since
+  // sync had no way to know this removal was intentional rather than "not synced yet."
+  if(!S.deletedIds.includes(id)){
+    S.deletedIds=[...S.deletedIds,id];
+    const delOk=await sv('delids',S.deletedIds);
+    if(!delOk){
+      showSaveError(`${staff.fn} ${staff.ln} was deleted, but the "don't re-add" marker failed to save — they may come back after a reload. Try Delete again if so.`);
+    }
   }
   const t=document.createElement('div');
   t.textContent=`✓ ${staff.fn} ${staff.ln} deleted — Pimsy ID ${staff.id} is free to reuse`;
