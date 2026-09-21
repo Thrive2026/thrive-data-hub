@@ -448,10 +448,24 @@ select,input,button,textarea{font-family:inherit}
     parsedRows.forEach(row => {
       if (!row.clientId || !row.staffName) return;
       if (row.lastBillableDate) {
-        clientBilling[row.clientId.toLowerCase()] = {
-          clientId: row.clientId, peerSupporter: row.staffName, manager: row.staffMgr,
-          lastBillableDate: row.lastBillableDate,
-        };
+        // FIX (9/21, root-caused from Rachel/Jessica's "renewals broken again" reports —
+        // Alicia frozen on a client reassigned to Laura J, and a client showing "no billable
+        // 35d" with actual notes on 9/6/9/12/9/16): a client with more than one open renewal
+        // type in the same export (a Treatment Plan row AND an NPPC row, say) used to let
+        // whichever row happened to come LAST in the file win for this client's billing-status
+        // pseudo-record — with no check on which row was actually more recent. If that client's
+        // stale row (old peer supporter, old last-billable-date) sorted after their current row
+        // in the file, this silently regressed the purple record back to the stale values: wrong
+        // "no billable Xd," and frozen under whoever the stale row's staff name was. Now keeps
+        // whichever row has the LATEST lastBillableDate for that client, regardless of file order.
+        const billingKey = row.clientId.toLowerCase();
+        const curBilling = clientBilling[billingKey];
+        if (!curBilling || new Date(row.lastBillableDate) > new Date(curBilling.lastBillableDate)) {
+          clientBilling[billingKey] = {
+            clientId: row.clientId, peerSupporter: row.staffName, manager: row.staffMgr,
+            lastBillableDate: row.lastBillableDate,
+          };
+        }
       }
       if (!row.expiresOn) return;
       const key = `${row.clientId.toLowerCase()}|${row.renewalType.toLowerCase()}`;
