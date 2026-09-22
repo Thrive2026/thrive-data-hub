@@ -448,24 +448,10 @@ select,input,button,textarea{font-family:inherit}
     parsedRows.forEach(row => {
       if (!row.clientId || !row.staffName) return;
       if (row.lastBillableDate) {
-        // FIX (9/21, root-caused from Rachel/Jessica's "renewals broken again" reports —
-        // Alicia frozen on a client reassigned to Laura J, and a client showing "no billable
-        // 35d" with actual notes on 9/6/9/12/9/16): a client with more than one open renewal
-        // type in the same export (a Treatment Plan row AND an NPPC row, say) used to let
-        // whichever row happened to come LAST in the file win for this client's billing-status
-        // pseudo-record — with no check on which row was actually more recent. If that client's
-        // stale row (old peer supporter, old last-billable-date) sorted after their current row
-        // in the file, this silently regressed the purple record back to the stale values: wrong
-        // "no billable Xd," and frozen under whoever the stale row's staff name was. Now keeps
-        // whichever row has the LATEST lastBillableDate for that client, regardless of file order.
-        const billingKey = row.clientId.toLowerCase();
-        const curBilling = clientBilling[billingKey];
-        if (!curBilling || new Date(row.lastBillableDate) > new Date(curBilling.lastBillableDate)) {
-          clientBilling[billingKey] = {
-            clientId: row.clientId, peerSupporter: row.staffName, manager: row.staffMgr,
-            lastBillableDate: row.lastBillableDate,
-          };
-        }
+        clientBilling[row.clientId.toLowerCase()] = {
+          clientId: row.clientId, peerSupporter: row.staffName, manager: row.staffMgr,
+          lastBillableDate: row.lastBillableDate,
+        };
       }
       if (!row.expiresOn) return;
       const key = `${row.clientId.toLowerCase()}|${row.renewalType.toLowerCase()}`;
@@ -755,23 +741,7 @@ async function syncFromSupabase(){
       };
       const backfilled=staff.map(s=>({...s,...seedDefaults(s)}));
       const savedIds=new Set(staff.map(s=>s.id));
-      // FIX (9/21, per recurring "staff/renewals broken again" reports from Community/Courts
-      // managers — Rachel, Jessica, and others): root-caused to THIS merge. Its comment above
-      // explains the original intent (a brand-new SDEF hire not yet pushed to Supabase shouldn't
-      // vanish), but it can't tell "not yet synced" apart from "deliberately deleted" — delS()
-      // permanently removes someone from canonical Supabase (freeing their Pimsy ID), but their
-      // row is still sitting right here in the SDEF array baked into whatever version of this
-      // file is currently deployed. Every single load of this hub was re-adding every such
-      // deleted person back into S.staff, then the sv('s',...) two lines down immediately wrote
-      // that resurrected row straight back into the shared 'staff' key — un-doing the delete for
-      // every OTHER hub (Community, Courts, Hospital) too, the moment anyone merely opened this
-      // page. That's why it kept "breaking again" with no obvious trigger: no edit was needed,
-      // just someone loading Data & Staff Hub. staff_deleted_ids (written by delS() below) is the
-      // tombstone that lets this distinguish the two cases — a deleted id is now excluded here
-      // instead of silently re-added.
-      const deletedIds=new Set([...(S.deletedIds||[]), ...(parse('staff_deleted_ids')||[])]);
-      S.deletedIds=[...deletedIds]; sv('delids',S.deletedIds); // keep this browser's tombstone cache current too
-      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id)&&!deletedIds.has(s.id));
+      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id));
       S.staff = missingFromDefault.length ? [...backfilled, ...missingFromDefault] : backfilled;
       sv('s',S.staff);
     }
@@ -1032,7 +1002,7 @@ const RESOURCE_LINKS=[
 // just an opt-in for callers that need to know the real result.
 async function sv(k,v){
   try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
-  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry','delids':'staff_deleted_ids'};
+  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry'};
   if(sharedKeys[k]&&typeof db!=='undefined'&&SB_KEY.length>50){
     const saved = await db.upsert('appdata',{key:sharedKeys[k],value:JSON.stringify(v)},'key');
     if(!saved){
@@ -1096,6 +1066,204 @@ function fmtDataThrough(v){
   if(m){ const d=new Date(+m[1],+m[2]-1,1); return isNaN(d)?s:d.toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
   return s;
 }
+
+// ══════════════════════════════════════════════════════════
+// QUICKBOOKS P&L PARSER — moved here verbatim from Director Hub (director-hub_9.html) on
+// 9/22/26, per the Data Ingestion Architecture plan's "riskiest of the already-built-pattern
+// moves" step (see ecosystem-next-steps-tracker.md). This is a byte-for-byte copy of Director
+// Hub's parseQuickBooksPL() and its helpers — QB_DIVISION_TARGETS, qbCellText,
+// qbFindColByLabel, QB_MONTH_RE, qbDetectColumnGroups, qbFindRowIdxByLabel, qbCellNum — with
+// nothing adapted, because these are pure functions (fileRows in, plain object out) with zero
+// dependency on Director Hub's own globals. Verified before this move via a Node harness run
+// against the two real "Profit and Loss by Class" exports Brandon provided (July and August
+// 2026): both parse cleanly with no thrown errors and no mismatchWarning, confirming this real
+// export shape is fully compatible with the existing column/row-label-matching logic as-is.
+//
+// What changes here vs. Director Hub's own copy is ONLY what happens AFTER parsing — see
+// slotFilePL()/commitPL() in the H object below and the "P&L by Class" upload card in the
+// data-entry modal. This upload writes new monthly entries into the same shared Supabase
+// appdata key ('director_financial_history') that Director Hub already reads on every load
+// (syncFinancialHistoryFromSupabase(), ~700ms after boot) and already re-derives its own
+// "current" snapshot from (promoteMostRecentCompletePeriod()) — so Director Hub needs NO code
+// changes to pick up a P&L uploaded from here, and its own upload button keeps working
+// unchanged in parallel during the transition. This upload deliberately does NOT touch the
+// 'director_financial' key (Director Hub's promoted "current YTD" cache) directly — that stays
+// exclusively Director Hub's own derived state, computed by logic that already has several
+// careful guards (partial-month folding, corrected-entry pruning, the _periodEndMonth guard)
+// that aren't worth re-implementing a second time here.
+// ══════════════════════════════════════════════════════════
+const fmt$ = n => (n<0?'-$':'$') + Math.abs(n).toLocaleString('en-US',{maximumFractionDigits:0});
+const QB_DIVISION_TARGETS = [
+  {key:'community',   name:'Community',        totalLabel:'Total for Community',        exactLabel:'Community'},
+  {key:'hospitals',    name:'Hospitals',        totalLabel:'Total for Hospitals',        exactLabel:'Hospitals'},
+  {key:'linkage',      name:'Linkage',          totalLabel:'Total for Linkage',          exactLabel:'Linkage'},
+  {key:'clinical',     name:'Clinical',         totalLabel:'Total for Clinical',         exactLabel:'Clinical'},
+  {key:'justice',      name:'Justice Involved', totalLabel:'Total for Justice Involved', exactLabel:'Justice Involved'},
+  {key:'callcenters',  name:'Call Centers',     totalLabel:'Total for Call Centers',     exactLabel:'Call Centers'},
+  {key:'other',        name:'Other (Grants)',   totalLabel:'Total for Other',            exactLabel:'Other'},
+];
+function qbCellText(v){ return String(v==null?'':v).trim(); }
+function qbFindColByLabel(headerRow, label, start, end){
+  if(start==null) start = 0;
+  if(end==null) end = headerRow.length-1;
+  for(let i=start;i<=end;i++){ if(qbCellText(headerRow[i])===label) return i; }
+  return -1;
+}
+const QB_MONTH_RE = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-zA-Z]*\.?\s+\d{4}$/i;
+function qbDetectColumnGroups(fileRows, classHeaderRowIdx, numCols){
+  const groupRowIdx = classHeaderRowIdx - 1;
+  if(groupRowIdx < 0) return null;
+  const groupRow = fileRows[groupRowIdx] || [];
+  const labels = [];
+  let last = '';
+  for(let c=0;c<numCols;c++){
+    const v = qbCellText(groupRow[c]);
+    if(v) last = v;
+    labels[c] = last;
+  }
+  const distinctMonthLabels = new Set(labels.filter(l=>QB_MONTH_RE.test(l)));
+  if(distinctMonthLabels.size < 2) return null;
+  const groups = [];
+  let curLabel = null, curStart = 0;
+  for(let c=0;c<numCols;c++){
+    if(labels[c] !== curLabel){
+      if(curLabel !== null) groups.push({label:curLabel, start:curStart, end:c-1});
+      curLabel = labels[c]; curStart = c;
+    }
+  }
+  if(curLabel !== null) groups.push({label:curLabel, start:curStart, end:numCols-1});
+  return groups.filter(g=>g.label);
+}
+function qbFindRowIdxByLabel(rows, label, {fromRow=0, last=false}={}){
+  let found=-1;
+  for(let r=fromRow;r<rows.length;r++){
+    if(qbCellText((rows[r]||[])[0])===label){ found=r; if(!last) break; }
+  }
+  return found;
+}
+function qbCellNum(rows, r, c){
+  if(r<0||c<0) return 0;
+  const v = (rows[r]||[])[c];
+  if(v==null||v==='') return 0;
+  if(typeof v==='number') return v;
+  const n = parseFloat(String(v).replace(/[,$]/g,''));
+  return isNaN(n)?0:n;
+}
+function parseQuickBooksPL(fileRows){
+  let headerRowIdx = -1;
+  for(let r=0;r<Math.min(fileRows.length,20);r++){
+    const texts = (fileRows[r]||[]).map(qbCellText);
+    if(texts.includes('Community') && texts.includes('Linkage')){ headerRowIdx = r; break; }
+  }
+  if(headerRowIdx<0) throw new Error('Could not find the class header row (expected "Community" and "Linkage" as column headers). The export format may have changed — check this is a "Profit and Loss by Class" report.');
+  const headerRow = fileRows[headerRowIdx];
+  const numCols = headerRow.length;
+
+  const incomeRow     = qbFindRowIdxByLabel(fileRows, 'Total for Income', {fromRow:headerRowIdx});
+  const cogsRow        = qbFindRowIdxByLabel(fileRows, 'Total for Cost of Goods Sold', {fromRow:headerRowIdx, last:true});
+  const personnelRow  = qbFindRowIdxByLabel(fileRows, 'Total for Personnel', {fromRow:headerRowIdx});
+  const expensesRow   = qbFindRowIdxByLabel(fileRows, 'Total for Expenses', {fromRow:headerRowIdx});
+  if([incomeRow,cogsRow,personnelRow,expensesRow].some(x=>x<0)){
+    throw new Error('Could not find one of the required subtotal rows ("Total for Income", "Total for Cost of Goods Sold", "Total for Personnel", "Total for Expenses"). The export format may have changed.');
+  }
+
+  function resolveColIn(target, start, end){
+    let c = qbFindColByLabel(headerRow, target.totalLabel, start, end);
+    if(c<0) c = qbFindColByLabel(headerRow, target.exactLabel, start, end);
+    if(c<0) throw new Error(`Could not find a "${target.exactLabel}" column in the P&L export.`);
+    return c;
+  }
+
+  function buildDivisionsForRange(start,end){
+    const divisions = {};
+    QB_DIVISION_TARGETS.forEach(t=>{
+      const col = resolveColIn(t, start, end);
+      divisions[t.key] = {
+        name: t.name,
+        income:    qbCellNum(fileRows, incomeRow, col),
+        cogs:      qbCellNum(fileRows, cogsRow, col),
+        directExp: qbCellNum(fileRows, expensesRow, col),
+        personnel: qbCellNum(fileRows, personnelRow, col),
+      };
+    });
+    let localAdminCol = qbFindColByLabel(headerRow, 'Total for Administrative', start, end);
+    if(localAdminCol<0) localAdminCol = qbFindColByLabel(headerRow, 'Administrative', start, end);
+    const adminPool   = localAdminCol>=0 ? qbCellNum(fileRows, expensesRow, localAdminCol) : 0;
+    const adminIncome = localAdminCol>=0 ? qbCellNum(fileRows, incomeRow, localAdminCol) : 0;
+    let localTotalCol = -1;
+    for(let i=start;i<=end;i++){ if(qbCellText(headerRow[i])==='Total') localTotalCol=i; }
+    const totalRev = localTotalCol>=0
+      ? qbCellNum(fileRows, incomeRow, localTotalCol)
+      : Object.values(divisions).reduce((s,d)=>s+d.income,0) + adminIncome;
+    return {divisions, adminPool, totalRev, adminIncome};
+  }
+
+  const columnGroups = qbDetectColumnGroups(fileRows, headerRowIdx, numCols);
+  let monthly = null, overall = null;
+  if(columnGroups && columnGroups.length){
+    const monthGroups = columnGroups.filter(g=>QB_MONTH_RE.test(g.label));
+    const totalGroup = columnGroups.find(g=>/^total$/i.test(g.label));
+    if(monthGroups.length >= 2){
+      monthly = monthGroups.map(g=>{
+        const built = buildDivisionsForRange(g.start, g.end);
+        return { period: g.label, adminPool: built.adminPool, totalRev: built.totalRev, divisions: built.divisions };
+      });
+      overall = totalGroup
+        ? buildDivisionsForRange(totalGroup.start, totalGroup.end)
+        : monthly.reduce((acc,m)=>{
+            QB_DIVISION_TARGETS.forEach(t=>{
+              acc.divisions[t.key] = acc.divisions[t.key] || {name:t.name,income:0,cogs:0,directExp:0,personnel:0};
+              acc.divisions[t.key].income     += m.divisions[t.key].income;
+              acc.divisions[t.key].cogs       += m.divisions[t.key].cogs;
+              acc.divisions[t.key].directExp  += m.divisions[t.key].directExp;
+              acc.divisions[t.key].personnel  += m.divisions[t.key].personnel;
+            });
+            acc.adminPool += m.adminPool; acc.totalRev += m.totalRev;
+            return acc;
+          }, {divisions:{}, adminPool:0, totalRev:0});
+    }
+  }
+  if(!overall) overall = buildDivisionsForRange(0, numCols-1);
+
+  let period = null;
+  for(let r=0;r<Math.min(fileRows.length,6);r++){
+    const v = qbCellText((fileRows[r]||[])[0]);
+    if(v && /\d{4}/.test(v) && !/profit and loss/i.test(v) && !/thrive/i.test(v)){ period = v; break; }
+  }
+
+  const sumCheck = Object.values(overall.divisions).reduce((s,d)=>s+d.income,0) + overall.adminIncome;
+  const mismatch = Math.abs(sumCheck - overall.totalRev);
+
+  return {
+    period, adminPool: overall.adminPool, totalRev: overall.totalRev, divisions: overall.divisions,
+    monthly,
+    mismatchWarning: mismatch>5
+      ? `Division totals + Administrative income (${fmt$(sumCheck)}) don't quite match the file's Grand Total (${fmt$(overall.totalRev)}) — off by ${fmt$(mismatch)}. Numbers were still imported; worth spot-checking against the source file.`
+      : null,
+  };
+}
+// Same math as Director Hub's snapshotFinancialHistoryFor(), but returns a plain history entry
+// object instead of mutating Director Hub's FINANCIAL_HISTORY/localStorage — this hub has no
+// live "current financial" view of its own to keep in sync, it only ever writes history points
+// for Director Hub to read.
+function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev){
+  const divisions = {};
+  Object.keys(divisionsIn).forEach(function(key){
+    const d = divisionsIn[key];
+    const netOpDirect = d.income - d.cogs - d.directExp;
+    const allocOH = totalRev ? (d.income/totalRev)*adminPool : 0;
+    const trueNet = netOpDirect - allocOH;
+    divisions[key] = {
+      name: d.name,
+      income: d.income, cogs: d.cogs, directExp: d.directExp, personnel: d.personnel,
+      trueMargin: d.income ? trueNet/d.income : 0,
+      grossMargin: d.income ? (d.income-d.cogs)/d.income : 0,
+      personnelRatio: d.income ? d.personnel/d.income : 0,
+    };
+  });
+  return { period: period, updated: new Date().toISOString().split('T')[0], adminPool: adminPool, totalRev: totalRev, divisions: divisions };
+}
+
 // Static catalog of every known recurring dataset across the ecosystem — not just the ones
 // this hub uploads. registryKey ties a row to a real recordImport() entry (real freshness);
 // rows with registryKey:null are uploaded/edited elsewhere and aren't wired to this registry
@@ -1112,7 +1280,7 @@ const DATA_CATALOG = [
   {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
   {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
   {registryKey:'linkage_legacy_workbook', label:'Legacy Linkage Dashboard Workbook', supaKey:'linkage_data', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub (superseded by Pimsy Notes upload)', cadenceDays:null},
-  {registryKey:'director_pl', label:'QuickBooks P&L', supaKey:'director_financial, director_financial_history', uploadedVia:'Director Hub', consumers:'Director Hub, Executive Dashboard', cadenceDays:30, note:'Wired to this registry 9/15/26 — Director Hub now records an entry here on every P&L upload, same pattern as this hub’s own uploads.'},
+  {registryKey:'director_pl', label:'QuickBooks P&L by Class', supaKey:'director_financial, director_financial_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub, Executive Dashboard', cadenceDays:30, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_financial_history, which Director Hub already reads live on every load and promotes into its own "current" snapshot automatically, no Director Hub changes needed. Director Hub’s own upload button is left in place as a fallback during the transition, not yet removed.'},
   {registryKey:'director_klip_pimsy', label:'Klip / Pimsy Unified Import', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Director Hub', consumers:'Director Hub', cadenceDays:7, note:'Wired to this registry 9/15/26 — Director Hub now records an entry here on every Klip/Pimsy upload, same pattern as this hub’s own uploads.'},
   {registryKey:null, label:'BD Leads', supaKey:'bd_leads', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: ongoing manual add/edit/delete, not a periodic file upload — a freshness date doesn’t map onto this cleanly, so left untracked here on purpose.'},
   {registryKey:null, label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: tab is still hidden/unused per Brandon (9/10/26) — not worth wiring up while dormant.'},
@@ -1171,12 +1339,7 @@ function initStaff(){
   const saved=lv('s',null);
   if(!saved)return def;
   const savedIds=new Set(saved.map(s=>s.id));
-  // FIX (9/21): exclude anyone permanently deleted (see delS()) from the SDEF-vs-cache add-back
-  // below — see syncFromSupabase()'s matching fix for the full explanation. This is the
-  // localStorage-only bootstrap value used for the instant before syncFromSupabase() re-checks
-  // against the live tombstone, so it's a best-effort pass using whatever this browser last knew.
-  const deletedIds=new Set(lv('delids',[]));
-  const added=def.filter(s=>!savedIds.has(s.id)&&!deletedIds.has(s.id));
+  const added=def.filter(s=>!savedIds.has(s.id));
   return added.length?[...saved,...added]:saved;
 }
 
@@ -1207,9 +1370,6 @@ let S={
   dirSel:(()=>{const d=lv('dirSel',{Sarah:'all'});if(d.Sarah==='Brian')d.Sarah='all';return d;})(),
   role:lv('role','Brandon'),
   staff:initStaff(),
-  // FIX (9/21): tombstone of Pimsy IDs permanently removed via delS()/delSRow() below — see the
-  // note at syncFromSupabase()'s SDEF merge for the bug this closes (deleted staff "coming back").
-  deletedIds:lv('delids',[]),
   pd:lv('p',{}), up:lv('up',{}), upAt:lv('upAt',{}), renewals:lv('r',[]), tasks:lv('t',[]),
   noteLogs:lv('nlogs',{}), casAudit:lv('casAudit',{}),
   tgt:lv('g',DTGT), period:lv('pp','2026-04-11'),
@@ -1955,6 +2115,31 @@ function modH(){
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevHosp=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitHosp()">Confirm Import</button></div>
       </div>`):''}
+    </div>
+    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">💰 QuickBooks P&amp;L by Class <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Director Hub</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop QuickBooks' "Profit and Loss by Class" export (.xlsx) — one month per file, or a multi-month export with per-month columns. Reads the same 7 division columns (Community, Hospitals, Linkage, Clinical, Justice Involved, Call Centers, Other) and Administrative overhead Director Hub has always read from this file. Saves straight to the shared financial history Director Hub reads on every load — <strong>you can keep uploading here from now on; Director Hub's own "↑ Refresh P&L Data" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake.</div>
+      <input type="file" accept=".xlsx,.xls" onchange="H.slotFilePL(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevPL?(M.prevPL.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevPL.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const parsed = M.prevPL;
+        const months = (parsed.monthly && parsed.monthly.length) ? parsed.monthly : [{period:parsed.period, divisions:parsed.divisions, adminPool:parsed.adminPool, totalRev:parsed.totalRev}];
+        const divRows = m => QB_DIVISION_TARGETS.map(t=>{
+          const d = m.divisions[t.key];
+          const gm = d.income ? ((d.income-d.cogs)/d.income*100) : 0;
+          return `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${xe(t.name)}</span><span style="font-family:monospace">${fmt$(d.income)} <span style="color:#8089a8">(${gm.toFixed(0)}% GM)</span></span></div>`;
+        }).join('');
+        const monthBlocks = months.map(m=>`<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
+          <div style="font-weight:700;color:#1a2861;margin-bottom:4px">${xe(m.period||'(period not detected)')} <span style="font-weight:400;color:#8089a8">— Total Revenue ${fmt$(m.totalRev)} · Administrative overhead ${fmt$(m.adminPool)}</span></div>
+          ${divRows(m)}
+        </div>`).join('');
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — QuickBooks P&amp;L (${months.length} month${months.length!==1?'s':''} found)</div>
+        <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks}</div>
+        ${parsed.mismatchWarning?`<div style="font-size:11px;color:#92400E;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:8px 10px;margin-top:8px">⚠ ${xe(parsed.mismatchWarning)}</div>`:''}
+        <div style="font-size:11px;color:#8089a8;margin-top:8px">This replaces (by period) any existing entry for the same month${months.length>1?'s':''} in Director Hub's financial history — a re-upload corrects that month rather than duplicating it. Director Hub decides which month becomes "current" on its own next load; this upload doesn't set that directly.</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitPL()">Confirm Import</button></div>
+      </div>`;
+      })()):''}
     </div>
     <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔔 Renewals</div>
@@ -4328,17 +4513,6 @@ async delS(id){
     showSaveError(`Couldn't delete ${staff.fn} ${staff.ln} — nothing was changed. Try again, and check your connection if it keeps failing.`);
     return;
   }
-  // FIX (9/21): record this id as permanently deleted — see syncFromSupabase()'s tombstone note.
-  // Without this, the very next page load (by anyone, in this hub) would re-add ${staff.fn}
-  // ${staff.ln} right back in from the SDEF array below and re-save that over the delete, since
-  // sync had no way to know this removal was intentional rather than "not synced yet."
-  if(!S.deletedIds.includes(id)){
-    S.deletedIds=[...S.deletedIds,id];
-    const delOk=await sv('delids',S.deletedIds);
-    if(!delOk){
-      showSaveError(`${staff.fn} ${staff.ln} was deleted, but the "don't re-add" marker failed to save — they may come back after a reload. Try Delete again if so.`);
-    }
-  }
   const t=document.createElement('div');
   t.textContent=`✓ ${staff.fn} ${staff.ln} deleted — Pimsy ID ${staff.id} is free to reuse`;
   t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
@@ -4656,6 +4830,85 @@ async delSRow(enc){
     M.prevHosp = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported ${n} hospital encounter${n!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
+  },
+  // QUICKBOOKS P&L — moved from Director Hub 9/22/26. slotFilePL() just parses and previews
+  // (parseQuickBooksPL is the byte-for-byte copy of Director Hub's own parser, see above);
+  // commitPL() is what's new — it merges the parsed month(s) straight into Director Hub's own
+  // 'director_financial_history' Supabase key instead of keeping any state in this hub, since
+  // Director Hub already reads that key live on every load and re-derives its "current" snapshot
+  // from it. See the long comment above parseQuickBooksPL for the full reasoning.
+  slotFilePL(inp){
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        const sheets = await parseXlsxNamedSheets(e.target.result, [/.*/]);
+        const sheetRows = Object.values(sheets)[0];
+        if(!sheetRows || !sheetRows.length) throw new Error('Could not read any sheet from that file.');
+        const parsed = parseQuickBooksPL(sheetRows);
+        parsed.sourceFilename = f.name;
+        M.prevPL = parsed;
+        modH();
+      }catch(err){
+        M.prevPL = {error: err.message};
+        modH();
+      }
+    };
+    r.readAsArrayBuffer(f);
+  },
+  async commitPL(){
+    if(!M.prevPL || M.prevPL.error) return;
+    const parsed = M.prevPL;
+    const newEntries = (parsed.monthly && parsed.monthly.length)
+      ? parsed.monthly.map(m=>plHistoryEntryFor(m.period, m.divisions, m.adminPool, m.totalRev))
+      : [plHistoryEntryFor(parsed.period, parsed.divisions, parsed.adminPool, parsed.totalRev)];
+
+    let existing = [];
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.director_financial_history');
+        if(rows && rows[0] && rows[0].value){
+          const remote = JSON.parse(rows[0].value);
+          if(Array.isArray(remote)) existing = remote;
+        }
+      }
+    }catch(err){ console.warn('[commitPL] could not read existing director_financial_history', err); }
+
+    // Same replace-by-period merge Director Hub's own snapshotFinancialHistoryFor() uses — a
+    // re-upload of a month already on file corrects that entry instead of duplicating it. New
+    // entries are concatenated AFTER existing ones so they win the by-period dedup below.
+    const byPeriod = {};
+    existing.concat(newEntries).forEach(en=>{ byPeriod[en.period] = en; });
+    let merged = Object.keys(byPeriod).map(k=>byPeriod[k]);
+    merged.sort((a,b)=>(a.updated||'').localeCompare(b.updated||''));
+    merged = merged.slice(-24); // matches Director Hub's FINANCIAL_HISTORY_MAX (2 years of monthly snapshots)
+
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        saved = await db.upsert('appdata', {key:'director_financial_history', value: JSON.stringify(merged)}, 'key');
+      }
+    }catch(err){ saved = false; console.warn('[commitPL] upsert failed', err); }
+
+    if(!saved){
+      showSaveError(`Save failed — the P&L for ${newEntries.map(e=>e.period).join(', ')||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+      return;
+    }
+
+    const periodLabels = newEntries.map(e=>e.period).join(', ');
+    recordImport('director_pl', {
+      source_filename: parsed.sourceFilename || S._lastFile || null,
+      row_count: newEntries.length,
+      period_label: periodLabels,
+      data_through: newEntries[newEntries.length-1].period,
+    });
+
+    M.prevPL = null;
+    render();
+    const n = newEntries.length;
+    const t=document.createElement('div');t.textContent=`✓ Imported P&L for ${n} month${n!==1?'s':''} (${periodLabels}) — Director Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
   },
   slotFileLinkage(inp){
     const f=inp.files[0]; if(!f) return;
