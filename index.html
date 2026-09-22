@@ -1264,6 +1264,650 @@ function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev){
   return { period: period, updated: new Date().toISOString().split('T')[0], adminPool: adminPool, totalRev: totalRev, divisions: divisions };
 }
 
+// ══════════════════════════════════════════════════════════════
+// KLIP BILLING EXPORT + CLINICAL GOALS + LINKAGE U-CODES — moved from Director Hub 9/22/26.
+// parseKlip(), parseClinicalNotesExport(), and parseLinkageUcodeNotes() below are ported
+// verbatim from Director Hub (byte-for-byte except the one fix noted on
+// parseClinicalNotesExport below), and were verified against Brandon's real files
+// (Klip_8-24.xlsx, Notes_9-21.xlsx) in a standalone Node harness before this port — zero
+// thrown errors, sensible real numbers, confirmed against the same two real-bug classes the
+// P&L relocation above turned up. Per Brandon's direction 9/22/26 ("upload in the data staff
+// hub and it parse to the respective hub"), there is deliberately NO confirm/preview gate for
+// Clinical Goals or Linkage U-codes — both auto-compute off the SAME raw Notes file the
+// existing Linkage/Courts "Confirm Import" button already commits, via H.commitNotes() below,
+// each with its own non-blocking toast. Klip Billing Export gets its own small upload card
+// (mirroring the P&L card above) since it's a genuinely separate file, not a cut of Notes.
+//
+// KNOWN LIMITATION, flagged to Brandon, not fixed here: LIVE_STAFF_MAP/LIVE_STAFF_STATUS_MAP
+// are left null on purpose — Data Hub's own live staff roster (S.staff) uses mgr:'Debra' (not
+// 'Deb') and has no 'Muneera' manager key at all, so wiring parseKlip's manager attribution to
+// this hub's live roster would silently misattribute or drop revenue for the Deb (Community)
+// and Muneera (Clinical) teams. parseKlip falls back to its own hardcoded MANAGER_STAFF table
+// (below) whenever LIVE_STAFF_MAP is null — the exact same code path already verified correct
+// against the real files — so this ports safely as-is. Making Data Hub's roster the source of
+// truth for Klip manager attribution is a real follow-up opportunity, not a defect.
+let LIVE_STAFF_MAP = null;
+let LIVE_STAFF_STATUS_MAP = null;
+function isInactiveProvider(name){
+  if(!name || !LIVE_STAFF_STATUS_MAP) return false;
+  const key = name.trim().toLowerCase().replace(/\s+/g,' ');
+  return LIVE_STAFF_STATUS_MAP[key] === 'Inactive';
+}
+async function parseKlip(arrayBuffer){
+  const b=new Uint8Array(arrayBuffer), dec=new TextDecoder();
+  function u16(i){return b[i]|(b[i+1]<<8);}
+  function u32(i){return(b[i]|(b[i+1]<<8)|(b[i+2]<<16)|(b[i+3]*0x1000000))>>>0;}
+  let eocd=-1;
+  for(let i=b.length-22;i>=Math.max(0,b.length-65557);i--){
+    if(b[i]===0x50&&b[i+1]===0x4B&&b[i+2]===0x05&&b[i+3]===0x06){eocd=i;break;}
+  }
+  if(eocd<0)throw new Error('Not a valid ZIP/XLSX');
+  const cdCount=u16(eocd+10),cdOffset=u32(eocd+16);
+  const entries={};let pos=cdOffset;
+  for(let e=0;e<cdCount;e++){
+    if(u32(pos)!==0x02014B50)break;
+    const method=u16(pos+10),csize=u32(pos+20),fnLen=u16(pos+28),exLen=u16(pos+30),cmLen=u16(pos+32),lhOff=u32(pos+42);
+    const name=dec.decode(b.slice(pos+46,pos+46+fnLen));
+    entries[name]={method,csize,lhOff};
+    pos+=46+fnLen+exLen+cmLen;
+  }
+  async function readEntry(name){
+    const e=entries[name]||Object.values(entries).find((_,k)=>k===name);
+    if(!e){const k=Object.keys(entries).find(k=>k.endsWith('/'+name)||k===name);if(!k)throw new Error('Not found: '+name);return readEntry(k);}
+    const lhFnLen=u16(e.lhOff+26),lhExLen=u16(e.lhOff+28),ds=e.lhOff+30+lhFnLen+lhExLen;
+    const raw=b.slice(ds,ds+e.csize);
+    if(e.method===0)return dec.decode(raw);
+    const st=new DecompressionStream('deflate-raw');
+    const w=st.writable.getWriter();w.write(raw);w.close();
+    const ch=[];const r=st.readable.getReader();
+    while(true){const{done,value}=await r.read();if(done)break;ch.push(value);}
+    const out=new Uint8Array(ch.reduce((a,c)=>a+c.length,0));
+    let p2=0;for(const c of ch){out.set(c,p2);p2+=c.length;}
+    return dec.decode(out);
+  }
+  const px=xml=>new DOMParser().parseFromString(xml,'text/xml');
+  const decodeXmlEntities=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+  let strings=[];
+  try{
+    const ss=await readEntry('xl/sharedStrings.xml');
+    const siRe=/<si>([\s\S]*?)<\/si>/g;
+    const tRe=/<t\b[^>]*>([\s\S]*?)<\/t>/g;
+    let siMatch;
+    while((siMatch=siRe.exec(ss))){
+      let s='',tMatch; tRe.lastIndex=0;
+      while((tMatch=tRe.exec(siMatch[1]))) s+=decodeXmlEntities(tMatch[1]);
+      strings.push(s);
+    }
+  }catch(e){}
+  const wbXml=await readEntry('xl/workbook.xml');
+  const relXml=await readEntry('xl/_rels/workbook.xml.rels');
+  const idToFile={};
+  px(relXml).querySelectorAll('Relationship').forEach(r=>{
+    const tgt=r.getAttribute('Target')||'';
+    idToFile[r.getAttribute('Id')]='xl/'+tgt.replace(/^\//,'').replace(/^\.\.\//,'').replace(/^xl\//,'');
+  });
+  const sheet=Array.from(px(wbXml).querySelectorAll('sheet'))[0];
+  const rid=sheet.getAttribute('r:id')||sheet.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id');
+  const sheetPath=idToFile[rid];
+  const sheetXml=await readEntry(sheetPath);
+  // Regex-based extraction instead of DOMParser — building a full DOM tree for a real
+  // year-long export (45k+ rows, 20MB+ of sheet XML) makes the browser tab freeze for
+  // 30-60+ seconds or longer with no visible progress, which reads as "nothing happens"
+  // when a file is picked. Scanning the raw XML text directly with regex avoids
+  // constructing ~700K DOM nodes and runs in low single-digit seconds even on files
+  // this size. Confirmed against a real 45,145-row / 21MB export.
+  const sheetRows=[];
+  const rowRe=/<row\b[^>]*>([\s\S]*?)<\/row>/g;
+  const cellRe=/<c\b([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g;
+  let rowMatch;
+  while((rowMatch=rowRe.exec(sheetXml))){
+    const row=[];
+    cellRe.lastIndex=0;
+    let cellMatch;
+    while((cellMatch=cellRe.exec(rowMatch[1]))){
+      const attrs=cellMatch[1], inner=cellMatch[2]||'';
+      const refM=attrs.match(/r="([A-Z]+)\d+"/);
+      if(!refM) continue;
+      let col=0;for(const ch of refM[1])col=col*26+ch.charCodeAt(0)-64;col--;
+      const tM=attrs.match(/t="([^"]+)"/);
+      const t=tM?tM[1]:null;
+      const vM=inner.match(/<v>([\s\S]*?)<\/v>/);
+      let val=vM?decodeXmlEntities(vM[1]):'';
+      if(t==='s')val=strings[parseInt(val)]||'';
+      else if(val!=='')val=isNaN(+val)?val:+val;
+      row[col]=val;
+    }
+    for(let j=0;j<row.length;j++)if(row[j]===undefined)row[j]='';
+    if(row.some(v=>v!==''))sheetRows.push(row);
+  }
+
+  const BASE_BILLABLE_CODES=new Set(['H0038','G9009','90832','90791','90834','90837','H0036','OTR- Linkage']);
+  function baseCode(code){ return String(code||'').trim().replace(/\s+(GT|HM)$/i,''); }
+  const MANAGER_STAFF={
+    Brian:['Willie Richardson','Earl McDonald','Brittany Zimmerman','Terrance Gray','Tey Miller','Tamara Dorroh','Angella Richard','Hollie Kosek','Lisa Colbert','Annika Norton','Becky Tucholski','Sayeh Ghane'],
+    Cara:['Cindy Kozlik','Robert Roach','Katerina Treer','Donna Bell','Nicholas Frisby','Brittney Sakmar','Jamie Kaucic','Graeme Baker','Tahleef Fitzgerald','Jennifer Hake','Monica Sparks','Alicia Kirkman','Joanna Cheek','Carl Curtis','Dustin Hurst','Kimberly Paridon'],
+    John:['Steven Sweatte','Nicole Descenna','Scott Works','Judy Middleton','Jeffery Magden','Charlotte Bobbitt','Michael Montalvo','Nadia Castille','Sky Kelley','Melvina Williams','Philip Taylor','William Mayor Jr.'],
+    Luke:['Royce Ruffin','Laura Jackson','Melissa McCauley','Jennifer Greenwald','Chanae Jordan','Angela Jones','James Zimmerman','Carmelita Woods','Charlotte Murdock','Robert Woods','Darrell Williams','Kayla Wludyga','Brandi Headley'],
+    Rachel:['Nancy Begly','Kristy Temple','Mario Linder','Kelly Brewer','Rashad Alaji','Brian Edwards','Christopher Cooper','Jeffrey Collins','Whister Winford','Elisabeth Pressler','Aubrey Dobrzeniecki','Carmen Manuel'],
+    Jessica:['Jennifer Barbera','Brandy Altop','Mario Ybarbo','Juanita Webb','Florencia Willis','Misty Breedlove','Jordan Ray','Ashley Allen','Michael Lutz','Sarah Adams','Jessica Ripley'],
+    Angelica:['Nancy Joseph','Rondye Brown','Stephen Sidoti','Susan Zelenka','David Begly','Tamara Ash','Derek Christopher','Anna Stevens','Jacqueline Kovach','Gabrielle Sabolich','La Vinia Evans','Ross Scott','Janine Roulette','Raegen Dalton','Hunter-Dane von Carlowitz'],
+    // NOTE (9/10/26): this list also includes Jessica Weygandt, Alyse Byrd, and David Lundgren —
+    // confirmed former Linkage staff. Deliberately NOT removed here, unlike the display rosters
+    // in the Linkage division view and Executive Hub's headcount list: this array feeds
+    // resolveMgr()'s name→manager lookup for attributing raw Pimsy notes to a division, and a
+    // future re-upload covering the months they actually worked still needs their notes to
+    // resolve to Deb/Linkage rather than falling through unattributed. Per Brandon 9/9/26: former
+    // staff should stay reflected in historical data, they just don't need an active scorecard row.
+    Deb:['Kristian Matheny','Danielle Ricketts','Lauren Garczynski','Genieva Sandel','Kristin Reynolds','Amber Cooley','Jessica Weygandt','Alyse Byrd','David Lundgren'],
+    Muneera:['Amanda Nelson','Lauren Breadon','Patricia Graf','Katie Gassaway','Katheryn Gassaway','Muneera Novak','Kristin Whitley','Kaitlynd Donato'],
+    // Danielle Ricketts is NOT added here even though she's also billing clinically under Muneera
+    // now — she's listed under Deb above, and this object feeds resolveMgr()'s fallback name→
+    // manager lookup (used by parseKlip when the live Supabase roster doesn't have someone).
+    // Object.entries() processes Deb before Muneera, so listing her under both would let the
+    // Muneera entry silently overwrite her Deb attribution and misroute her existing Community/
+    // Linkage revenue onto Muneera's team. Her clinical-role gating is handled separately and
+    // safely by CLINICAL_ROSTER below, which doesn't touch this lookup at all.
+  };
+  const norm=n=>n?' '.repeat(0)+String(n).trim().replace(/\s+/g,' ').toLowerCase():'';
+  const fallbackNameToMgr={};
+  Object.entries(MANAGER_STAFF).forEach(([mgr,sl])=>sl.forEach(s=>fallbackNameToMgr[norm(s)]=mgr));
+  function resolveMgr(providerName){
+    const key = norm(providerName);
+    if(LIVE_STAFF_MAP && LIVE_STAFF_MAP[key]) return LIVE_STAFF_MAP[key];
+    return fallbackNameToMgr[key] || '';
+  }
+
+  function excelDate(v){
+    if(typeof v==='number'){const d=new Date((v-25569)*86400000);return isNaN(d)?null:d;}
+    if(typeof v==='string'){const d=new Date(v);return isNaN(d)?null:d;}
+    return null;
+  }
+
+  // Klip exports commonly cover several months in one file (confirmed against a real upload —
+  // Jan–May 2026 in one file). The old approach filtered every row down to whichever single
+  // calendar month was most recent in the file and threw the rest away outright — that's what
+  // caused the real incident where a file scoped June 1–Aug 1 collapsed to just Aug 1st (a
+  // single day) and destroyed two months of real June/July data with it. Bucketing by month
+  // instead means nothing gets discarded: every month found gets its own fully-computed
+  // provider/manager breakdown. The LIVE dashboard view (KPIs, provider tables, goal tracker)
+  // still pins to whichever month is most recent in the file — that's still correct, a
+  // single-month pace view is the right design there — but now it's a case of "show the
+  // newest month" rather than "delete everything else." Older months ride along in
+  // `monthly` so importUnified can snapshot each into Trends history instead of losing them.
+  // Column positions are read from the header row (row 0) by name, not hardcoded — Pimsy's
+  // Klipfolio billing export has shown up with more than one column layout in practice (a wider,
+  // 13+-column export the original positional indices below were written against, and a leaner
+  // 9-column "Klipfolio Rpt" export — Client/Referral Source/Service Date/blank/Service
+  // Code/Provider/Duration/Total Charge/Total Paid — that Brandon actually pulls day to day).
+  // Hardcoded positions silently read the wrong cell for the wrong layout instead of erroring —
+  // that's exactly what turned a real upload into an all-$0/"Unknown period" result with no
+  // warning. Looking columns up by name works for either layout (or a future reordering) and
+  // fails loudly with a clear message when the header truly doesn't match, instead of silently
+  // parsing garbage.
+  const header = (sheetRows[0]||[]).map(function(h){ return String(h||'').trim().toLowerCase(); });
+  function findCol(names){
+    for(const n of names){ const i=header.indexOf(n); if(i!==-1) return i; }
+    return -1;
+  }
+  const COL_CLIENT = findCol(['client']);
+  const COL_DATE = findCol(['service date']);
+  const COL_CODE = findCol(['service code','billing code']);
+  const COL_PROVIDER = findCol(['provider','performed by']);
+  const COL_CHARGE = findCol(['total charge']);
+  const COL_PAID = findCol(['total paid']);
+  const missingCols = [['Client',COL_CLIENT],['Service Date',COL_DATE],['Service Code/Billing Code',COL_CODE],['Provider/Performed By',COL_PROVIDER],['Total Charge',COL_CHARGE],['Total Paid',COL_PAID]]
+    .filter(function(pair){ return pair[1]===-1; }).map(function(pair){ return pair[0]; });
+  if(missingCols.length){
+    throw new Error('This doesn\'t look like a recognized Klip billing export — missing column(s): '+missingCols.join(', ')+'. Header row found: '+header.join(', '));
+  }
+
+  // Charge amounts, pooled across every priced (charge>0) billable-code encounter in the whole
+  // file, keyed by base code — this is the sample set forecastRevenue (below) draws its per-code
+  // rate from. Pooled globally (not per-provider or per-manager) since a code already captures
+  // the service type/duration that mostly drives its rate, and pooling keeps the sample size
+  // large enough for a stable median even for a small team.
+  const codeChargeSamples = {}; // basecode -> [chargeNum, ...]
+
+  const monthBuckets = {}; // 'YYYY-M' -> { pstats:{}, minDate, maxDate }
+  for(let i=1;i<sheetRows.length;i++){
+    const r=sheetRows[i];
+    if(!r)continue;
+    const sdate=excelDate(r[COL_DATE]);
+    if(!sdate)continue;
+    const mk = sdate.getFullYear()+'-'+String(sdate.getMonth()+1).padStart(2,'0');
+    if(!monthBuckets[mk]) monthBuckets[mk] = { pstats:{}, minDate:sdate, maxDate:sdate };
+    const bucket = monthBuckets[mk];
+    if(sdate<bucket.minDate) bucket.minDate=sdate;
+    if(sdate>bucket.maxDate) bucket.maxDate=sdate;
+    const provider=r[COL_PROVIDER];if(!provider)continue;
+    const code=String(r[COL_CODE]||'').trim();
+    const bcode=baseCode(code);
+    const paid=r[COL_PAID];
+    const charge=r[COL_CHARGE];
+    const client=String(r[COL_CLIENT]||'');
+    const pnorm=norm(provider);
+    if(!bucket.pstats[pnorm])bucket.pstats[pnorm]={display:String(provider).trim().replace(/\s+/g,' '),revenue:0,rendered:0,paidTotal:0,partialAdj:0,encounters:0,billable:0,uncompensated:0,pendingByCode:{},clients:new Set(),mgr:resolveMgr(provider)};
+    const ps=bucket.pstats[pnorm];
+    ps.encounters++;
+    if(client)ps.clients.add(client);
+    if(BASE_BILLABLE_CODES.has(bcode)){
+      // Revenue basis is Total Charge (billed), not Total Paid (collected) — per Brandon, Sep 2026,
+      // to match how the Clinical Breakeven Model's own targets were built ("Invoiced=True
+      // records") and to avoid claims-payment lag making the most recent month look artificially
+      // empty every time (Total Paid can trail the actual clinical work by weeks). `rendered` is
+      // now the same figure as `revenue` (kept as a separate field since older snapshots and any
+      // downstream readers already expect both); `paidTotal` keeps the collected amount around
+      // separately for reference/reconciliation, but nothing derives "revenue" from it anymore.
+      // `uncompensated` now means "billable-code encounter with no charge entered yet" (a
+      // charge-entry-lag signal) rather than "not yet paid."
+      const chargeNum=parseFloat(charge)||0;
+      const paidNum=paid?(parseFloat(paid)||0):0;
+      ps.rendered+=chargeNum;
+      ps.paidTotal+=paidNum;
+      if(chargeNum>0){
+        ps.revenue+=chargeNum;ps.billable++;
+        if(chargeNum>paidNum)ps.partialAdj+=(chargeNum-paidNum);
+        (codeChargeSamples[bcode]=codeChargeSamples[bcode]||[]).push(chargeNum);
+      }
+      else{
+        ps.uncompensated++;
+        ps.pendingByCode[bcode]=(ps.pendingByCode[bcode]||0)+1;
+      }
+    }
+  }
+
+  function median(nums){
+    if(!nums||!nums.length) return null;
+    const s=nums.slice().sort((a,b)=>a-b);
+    const mid=Math.floor(s.length/2);
+    return s.length%2 ? s[mid] : (s[mid-1]+s[mid])/2;
+  }
+  // Per-code expected rate, used to forecast revenue still sitting uncharged (see
+  // ps.pendingByCode above) — median of every real priced encounter for that code found
+  // anywhere in this file. Requires at least 5 samples before trusting a code's rate at all;
+  // a code with fewer real examples just contributes nothing to the forecast rather than a
+  // shaky estimate from 1-2 data points.
+  const codeRates = {};
+  Object.keys(codeChargeSamples).forEach(function(code){
+    if(codeChargeSamples[code].length>=5) codeRates[code]=median(codeChargeSamples[code]);
+  });
+
+  const MGRS=['Brian','Cara','John','Luke','Rachel','Jessica','Angelica','Deb','Muneera'];
+  // monthSpan is always exactly 1 now — each bucket is a single calendar month by
+  // construction, so monthly_avg and revenue are the same figure (kept as separate fields
+  // since every downstream renderer already reads monthly_avg).
+  //
+  // Team-level totals (revenue/monthly_avg/staff_billed/client_count/etc.) are computed from
+  // ACTIVE providers only — same isInactiveProvider/LIVE_STAFF_STATUS_MAP gate every renderer
+  // already applies to the per-provider list via activeProviders() before display. Before this
+  // fix, that gate only ran at render time on `out[mgr].providers`, while the team-level totals
+  // here were summed from the full, unfiltered `provs` — so a departed/inactive clinician's
+  // billing was excluded from the "Team Mo. Avg" KPI tile (which re-sums the filtered provider
+  // list at render time) but still baked into the manager-level total that gets snapshotted into
+  // PIMSY_HISTORY for the Monthly/Weekly Trend charts. Two numbers for "the same" team, for the
+  // same period, that couldn't agree. Filtering here instead makes every downstream reader of
+  // out[mgr].revenue/monthly_avg (current tiles AND history) consistent by construction. The
+  // full, unfiltered `provs` list is still what's stored in `providers:` below, so nothing that
+  // already re-filters at render time changes — this only fixes the team-level aggregate fields.
+  // Forecasted revenue for one provider: their already-charged revenue, plus the expected value
+  // of every billable-code encounter that doesn't have a charge entered yet (ps.pendingByCode),
+  // using that code's real median rate from codeRates above. A code with too few real samples to
+  // trust (see codeRates' 5-sample floor) just contributes its actual $0 rather than a guess —
+  // this makes the forecast a floor/best-estimate, not an upper bound, when rates are thin.
+  function forecastFor(p){
+    let add=0;
+    Object.keys(p.pendingByCode||{}).forEach(function(code){
+      const rate=codeRates[code];
+      if(rate!=null) add += rate*p.pendingByCode[code];
+    });
+    return p.revenue+add;
+  }
+  function buildMgrOut(pstats){
+    const out={};
+    MGRS.forEach(mgr=>{
+      const provs=Object.values(pstats).filter(p=>p.mgr===mgr);
+      const activeProvs=provs.filter(p=>!isInactiveProvider(p.display));
+      const totalRev=activeProvs.reduce((a,p)=>a+p.revenue,0);
+      const totalForecast=activeProvs.reduce((a,p)=>a+forecastFor(p),0);
+      const totalRendered=activeProvs.reduce((a,p)=>a+p.rendered,0);
+      const totalPaid=activeProvs.reduce((a,p)=>a+p.paidTotal,0);
+      const totalPartialAdj=activeProvs.reduce((a,p)=>a+p.partialAdj,0);
+      const totalUncompensated=activeProvs.reduce((a,p)=>a+p.uncompensated,0);
+      const allClients=new Set();activeProvs.forEach(p=>p.clients.forEach(c=>allClients.add(c)));
+      out[mgr]={
+        revenue:Math.round(totalRev*100)/100,
+        monthly_avg:Math.round(totalRev*100)/100,
+        // Forecasted total for this month — actual charged revenue plus the expected value of
+        // billable encounters still waiting on a charge to be entered (charge-entry lag). See
+        // forecastFor above. Equals `revenue` once every billable encounter has a real charge.
+        revenue_forecast:Math.round(totalForecast*100)/100,
+        client_count:allClients.size,
+        staff_billed:activeProvs.length,
+        encounters:activeProvs.reduce((a,p)=>a+p.encounters,0),
+        billable_encounters:activeProvs.reduce((a,p)=>a+p.billable,0),
+        rendered:Math.round(totalRendered*100)/100,
+        paid:Math.round(totalPaid*100)/100,
+        partial_adjustment:Math.round(totalPartialAdj*100)/100,
+        uncompensated_count:totalUncompensated,
+        providers:provs.sort((a,b)=>b.revenue-a.revenue).map(p=>({
+          name:p.display,
+          revenue:Math.round(p.revenue*100)/100,
+          monthly_avg:Math.round(p.revenue*100)/100,
+          revenue_forecast:Math.round(forecastFor(p)*100)/100,
+          clients:p.clients.size,
+          encounters:p.encounters,
+          billable_encounters:p.billable,
+          uncompensated:p.uncompensated,
+          rendered:Math.round(p.rendered*100)/100,
+          paid:Math.round(p.paidTotal*100)/100,
+          partial_adjustment:Math.round(p.partialAdj*100)/100,
+        }))
+      };
+    });
+    return out;
+  }
+
+  const today=new Date();
+  const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function fmtMonthYear(d){ return `${MONTH_ABBR[d.getMonth()]} ${d.getFullYear()}`; }
+  const generated=today.toISOString().split('T')[0];
+
+  const monthKeys = Object.keys(monthBuckets).sort();
+  const latestKey = monthKeys[monthKeys.length-1];
+  const monthly = {};
+  monthKeys.forEach(mk=>{
+    const bucket = monthBuckets[mk];
+    const [y,m] = mk.split('-').map(Number);
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const dataThroughDay = bucket.maxDate.getDate();
+    monthly[mk] = {
+      period: bucket.minDate.getMonth()===bucket.maxDate.getMonth() && bucket.minDate.getFullYear()===bucket.maxDate.getFullYear()
+        ? fmtMonthYear(bucket.minDate)
+        : `${fmtMonthYear(bucket.minDate)}–${fmtMonthYear(bucket.maxDate)}`,
+      generated,
+      periodEndDate: bucket.maxDate.toISOString().split('T')[0],
+      managers: buildMgrOut(bucket.pstats),
+      daysInMonth,
+      dataThroughDay,
+      // Only the most-recent month in the file can be "partial" — every earlier month in the
+      // same file is, by definition, already closed out by the time later dates appear in it.
+      partial: (mk===latestKey) && (dataThroughDay < daysInMonth),
+    };
+  });
+
+  // Which month gets PROMOTED to the live dashboard view (KPI tiles' live-snapshot fallback,
+  // the Per-Clinician Goal Tracker, "At Target"/"Below 70%") — normally just the chronologically
+  // latest month in the file, same as before. But a real Klip export from Brandon (2026-09-04)
+  // had exactly one day of the *next* calendar month mixed in (a handful of Sep 1 rows, all
+  // ADMIN/non-billable or same-day-uncharged) — technically newer than Aug, so it silently
+  // dethroned a complete, real August as "live" and replaced it with a nearly-empty single day,
+  // zeroing out every provider row and the two tiles that read the live snapshot instead of
+  // Trends history. A real reporting month reaches a handful of days of its own data almost
+  // immediately; a leaked day or two from an export boundary essentially never does. Require the
+  // latest month to have at least MIN_LIVE_DAYS days of its own data before trusting it as
+  // "current" — otherwise stay pinned to the previous (real) month. The thin month is NOT
+  // discarded — it's still in `monthly` below and still backfills Trends history once it has
+  // enough of its own data to stand on its own.
+  const MIN_LIVE_DAYS = 3;
+  let promoteKey = latestKey;
+  if(latestKey && monthKeys.length > 1 && monthly[latestKey].dataThroughDay < MIN_LIVE_DAYS){
+    promoteKey = monthKeys[monthKeys.length-2];
+  }
+  const latest = promoteKey ? monthly[promoteKey] : null;
+  return {
+    period: latest ? latest.period : 'Unknown period',
+    generated,
+    // A totally-failed parse (no valid dated rows found at all) used to fall back to today's
+    // wall-clock date here — which made a broken upload look like it covered a period "in the
+    // future" relative to any real month, permanently blocking every good upload afterward from
+    // ever being accepted as newer (see the isNewerOrSame self-heal below; this is the
+    // other half of that fix, so it can't happen again). null here correctly signals "no real
+    // period at all" instead of a fake date that out-ranks real ones.
+    periodEndDate: latest ? latest.periodEndDate : null,
+    managers: latest ? latest.managers : {},
+    partial: latest ? latest.partial : true,
+    monthly, // every month found in the file — nothing discarded, used to backfill Trends
+  };
+}
+
+// PIMSY_HISTORY_MAX mirrors Director Hub's own constant — roughly 6 months of weekly Klip
+// snapshots kept in director_pimsy_history.
+const PIMSY_HISTORY_MAX = 26;
+// Builds one director_pimsy_history entry from a parsed Klip month, mirroring Director Hub's
+// own snapshotPimsyHistory() entry shape exactly (date/period/partial/teamTotals) so Director
+// Hub's existing Trends charts read this hub's uploads with zero changes on that end.
+function klipHistoryEntryFor(monthEntry){
+  const date = (monthEntry && (monthEntry.periodEndDate || monthEntry.generated)) || new Date().toISOString().split('T')[0];
+  const teamTotals = {};
+  const managers = (monthEntry && monthEntry.managers) || {};
+  Object.keys(managers).forEach(function(mgrKey){
+    const md = managers[mgrKey];
+    teamTotals[mgrKey] = {
+      revenue: md.revenue || 0,
+      revenue_forecast: md.revenue_forecast != null ? md.revenue_forecast : (md.revenue || 0),
+      monthly_avg: md.monthly_avg || 0,
+      staff_billed: md.staff_billed || 0,
+      client_count: md.client_count || 0
+    };
+  });
+  return { date: date, period: monthEntry && monthEntry.period, partial: !!(monthEntry && monthEntry.partial), teamTotals: teamTotals };
+}
+
+const CLINICAL_ROSTER = [
+  { fn:'Amanda',   ln:'Nelson'   },
+  { fn:'Lauren',   ln:'Breadon'  },
+  { fn:'Patricia', ln:'Graf'     },
+  { fn:'Katie',    ln:'Gassaway' },
+  { fn:'Muneera',  ln:'Novak'    },
+  { fn:'Kaitlynd', ln:'Donato'   },
+  { fn:'Danielle', ln:'Ricketts' },
+];
+const clinNorm = n => n ? String(n).trim().replace(/\s+/g,' ').toLowerCase() : '';
+const CLINICAL_TARGETS = { 'Amanda Nelson':5827, 'Lauren Breadon':3663, 'Patricia Graf':3088, 'Katie Gassaway':2691, 'Muneera Novak':0, 'Kaitlynd Donato':7213, 'Danielle Ricketts':2691 };
+// Pimsy/KLip billing data lists her under her legal first name rather than the name used in
+// the Clinical Team Dashboard's Monthly Goals sheet — same alias-resolution pattern as
+// SUP_NAME_ALIASES elsewhere, so the target still resolves regardless of which name a given
+// data source uses.
+const CLINICAL_TARGET_ALIASES = { 'katheryn gassaway':'Katie Gassaway' };
+function clinicalTargetForName(name){
+  if(CLINICAL_TARGETS[name]!=null) return CLINICAL_TARGETS[name];
+  const norm = String(name||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const canonical = CLINICAL_TARGET_ALIASES[norm];
+  if(canonical && CLINICAL_TARGETS[canonical]!=null) return CLINICAL_TARGETS[canonical];
+  for(const k in CLINICAL_TARGETS){ if(k.trim().toLowerCase()===norm) return CLINICAL_TARGETS[k]; }
+  return null;
+}
+const CLINICAL_RATE_TABLE = { '90791':125.28, '90832':60.49, '90834':78.63, '90837':115.35 };
+const CLINICAL_CPST_RATE = 88.12; // per hour
+// Weekly targets, uniform across the team per the Weekly Clinical Goals workbook's own
+// "Discharge Weekly Goal" (10) / "Outreach Weekly Goal" (15) columns. Flag to Brandon if these
+// should actually vary by clinician — the source workbook didn't show variation.
+const CLINICAL_DISCHARGE_WEEKLY_GOAL = 10;
+const CLINICAL_OUTREACH_WEEKLY_GOAL = 15;
+const WEEKS_PER_MONTH = 4.345; // 365.25/12/7 — used to turn a weekly goal into a monthly one
+function parseClinicalNotesExport(rows){
+  const hdr = rows[0].map(h=>String(h||'').trim());
+  const idx = name => hdr.findIndex(h=>h.toLowerCase()===name.toLowerCase());
+  const colDate=idx('Service Date'), colBy=idx('Performed By'), colType=idx('Note Type'), colCode=idx('Billing Code'), colDur=idx('Duration in Minutes');
+  if(colDate<0||colBy<0||colType<0||colCode<0){
+    throw new Error('Not a recognized Notes export — need Service Date, Performed By, Note Type, and Billing Code columns.');
+  }
+  function toDate(v){
+    if(v==null||v==='') return null;
+    // FIX (9/22/26, Data Hub port): Director Hub feeds this function rows from ITS OWN
+    // parseXlsxNamedSheets(buffer, patterns, true) — the `true` (keepFullDate) makes date-styled
+    // cells come back as "YYYY-MM-DD" strings, which the branch below already handled. Data Hub's
+    // own parseXlsxNamedSheets (no such flag) instead returns a real JS Date object for a
+    // date-styled cell — without this check, `+v` on a Date silently reads as its epoch-millis
+    // value and gets treated as an Excel serial number, producing a garbage date far outside any
+    // real month and making every row in the file fail the target-month filter below. Same
+    // instanceof check Data Hub's own parseLinkageNotesExport already had to add for the same
+    // reason — found and fixed during real-file verification before this went live, not after.
+    if(v instanceof Date) return isNaN(v)?null:v;
+    if(typeof v==='string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return new Date(v.slice(0,10)+'T00:00:00Z');
+    const n=+v;
+    if(!isNaN(n) && typeof v!=='string') return new Date(Date.UTC(1899,11,30) + Math.floor(n)*86400000); // floor, not round - avoids rolling a PM timestamp into the next day
+    const d=new Date(v); return isNaN(d)?null:d;
+  }
+  // Alias-aware roster lookup — CLINICAL_TARGET_ALIASES already handled this mismatch for goal
+  // lookups (the Notes export lists her as "Katheryn Gassaway", not "Katie Gassaway"), but this
+  // separate roster gate never got the same treatment, so her rows were being silently dropped
+  // as "not a clinical-team clinician" before they ever reached the goal lookup. Same fix here.
+  const byName={};
+  CLINICAL_ROSTER.forEach(s=>{ byName[clinNorm(s.fn+' '+s.ln)]=s; });
+  Object.entries(CLINICAL_TARGET_ALIASES).forEach(([aliasKey,canonicalName])=>{
+    const canonicalKey = clinNorm(canonicalName);
+    if(byName[canonicalKey]) byName[aliasKey]=byName[canonicalKey];
+  });
+  // Notes exports commonly cover several months in one file (verified against a real 3-month
+  // pull) — Clinical Goals is a single-month mid-month pace view, so restrict to whichever
+  // month is most recent in the file rather than summing everything together.
+  let maxDate=null;
+  for(let i=1;i<rows.length;i++){
+    const d=toDate(rows[i]&&rows[i][colDate]);
+    if(d && (!maxDate||d>maxDate)) maxDate=d;
+  }
+  const targetY = maxDate?maxDate.getUTCFullYear():null, targetM = maxDate?maxDate.getUTCMonth():null;
+  const acc={}; // key -> accumulator
+  // FIX (9/22/26, Data Hub port): the roster gate below used to just `continue` on a non-roster
+  // name with nothing recorded about it — the "unmatched" list this function returns has always
+  // been shown on the (Director Hub) preview screen as "⚠️ N unmatched", but N was always 0 no
+  // matter what was actually in the file, since nothing was ever added to it. Found during
+  // real-file verification for this relocation, not introduced by it. unmatchedCounts now tracks
+  // any NON-roster name attached to a row with a clinically-shaped billing code (one of
+  // CLINICAL_RATE_TABLE's codes, or CPST) in the target month — i.e. someone whose billing
+  // pattern looks like real clinical work that isn't landing in Clinical Goals because their name
+  // doesn't match CLINICAL_ROSTER (the exact Katheryn/Katie Gassaway-style drift the alias table
+  // above already had to patch once). This deliberately does NOT flag every non-roster name in
+  // the file — Linkage/Community staff show up in this same export constantly and are supposed
+  // to be skipped silently — only names that look like they should have matched a clinician.
+  const unmatchedCounts = {};
+  for(let i=1;i<rows.length;i++){
+    const row=rows[i]; if(!row) continue;
+    const rawName=String(row[colBy]||'').trim(); if(!rawName) continue;
+    const key=clinNorm(rawName);
+    const staff=byName[key];
+    const d = toDate(row[colDate]);
+    if(!d || d.getUTCFullYear()!==targetY || d.getUTCMonth()!==targetM) continue; // outside target month
+    const billCode=String(row[colCode]||'');
+    if(!staff){
+      const looksClinical = Object.keys(CLINICAL_RATE_TABLE).some(code=>billCode.includes(code)) || /cpst/i.test(billCode);
+      if(looksClinical) unmatchedCounts[rawName] = (unmatchedCounts[rawName]||0)+1;
+      continue; // not a clinical-team clinician — irrelevant rows (PRS, etc.) skipped silently
+    }
+    if(!acc[key]) acc[key]={ name: staff.fn+' '+staff.ln, units:{}, cpstMinutes:0, discharge:0, outreach:0, weekly:[0,0,0,0,0] };
+    const a=acc[key];
+    const noteType=String(row[colType]||'').trim();
+    let matchedCode=null;
+    for(const code in CLINICAL_RATE_TABLE){ if(billCode.includes(code)){ matchedCode=code; break; } }
+    if(matchedCode){
+      a.units[matchedCode]=(a.units[matchedCode]||0)+1;
+      if(d){ const wk=Math.min(4, Math.floor((d.getUTCDate()-1)/7)); a.weekly[wk]+=CLINICAL_RATE_TABLE[matchedCode]; }
+    } else if(/cpst/i.test(billCode)){
+      const mins = parseFloat(row[colDur])||0;
+      a.cpstMinutes += mins;
+      if(d){ const wk=Math.min(4, Math.floor((d.getUTCDate()-1)/7)); a.weekly[wk]+=(mins/60)*CLINICAL_CPST_RATE; }
+    }
+    if(noteType==='Discharge Summary') a.discharge++;
+    if(noteType==='Phone Note' || noteType==='Phone Note-No Contact') a.outreach++;
+  }
+  const daysInMonth = maxDate ? new Date(Date.UTC(maxDate.getUTCFullYear(), maxDate.getUTCMonth()+1, 0)).getUTCDate() : 30;
+  const dayOfMonth = maxDate ? maxDate.getUTCDate() : daysInMonth;
+  const matched=[];
+  const unmatched = Object.keys(unmatchedCounts).sort((a,b)=>unmatchedCounts[b]-unmatchedCounts[a]);
+  Object.entries(acc).forEach(([key,a])=>{
+    let unitTotal=0;
+    Object.entries(a.units).forEach(([code,n])=>{ unitTotal += n*CLINICAL_RATE_TABLE[code]; });
+    const monthlyTotal = unitTotal + (a.cpstMinutes/60)*CLINICAL_CPST_RATE;
+    const monthlyGoal = clinicalTargetForName(a.name);
+    const dischargeGoal = Math.round(CLINICAL_DISCHARGE_WEEKLY_GOAL*WEEKS_PER_MONTH);
+    const outreachGoal = Math.round(CLINICAL_OUTREACH_WEEKLY_GOAL*WEEKS_PER_MONTH);
+    const paceStatus = monthlyGoal!=null ? Math.round(monthlyGoal*(dayOfMonth/daysInMonth)*100)/100 : null;
+    matched.push({
+      name:a.name, key,
+      monthlyTotal: Math.round(monthlyTotal*100)/100,
+      monthlyGoal,
+      progressPct: monthlyGoal ? Math.round((monthlyTotal/monthlyGoal)*1000)/10 : null,
+      paceStatus,
+      dischargeTotal:a.discharge, dischargeGoal, dischargePct: Math.round((a.discharge/dischargeGoal)*1000)/10,
+      outreachTotal:a.outreach, outreachGoal, outreachPct: Math.round((a.outreach/outreachGoal)*1000)/10,
+      weeklyTotals:a.weekly.map(v=>Math.round(v*100)/100),
+    });
+  });
+  return { matched, unmatched };
+}
+const LK_UCODE_LABELS = {
+  1:'Successful facility-based initiation', 2:'Unsuccessful facility-based initiation',
+  3:'Successful community-based initiation', 4:'Unsuccessful community-based initiation',
+  5:'Successful initial linkage to treatment', 6:'Unsuccessful initial linkage to treatment',
+  7:'Successful engagement to treatment', 8:'Unsuccessful engagement to treatment',
+  9:'Maintained engagement with treatment',
+};
+function parseLinkageUcodeNotes(rows){
+  const hdr = rows[0].map(h=>String(h||'').trim());
+  const idx = name => hdr.findIndex(h=>h.toLowerCase()===name.toLowerCase());
+  const colDate=idx('Service Date'), colBy=idx('Performed By'), colCode=idx('Billing Code'), colDiv=idx('Division');
+  if(colDate<0||colBy<0||colCode<0||colDiv<0){
+    throw new Error('Not a recognized Notes export — need Service Date, Performed By, Billing Code, and Division columns.');
+  }
+  function toDate(v){
+    if(v==null||v==='') return null;
+    // Same Data-Hub-vs-Director-Hub Date-object fix as parseClinicalNotesExport's toDate above —
+    // Data Hub's own parseXlsxNamedSheets returns a real Date object for a date-styled cell,
+    // not the "YYYY-MM-DD" string Director Hub's own reader produces.
+    if(v instanceof Date) return isNaN(v)?null:v;
+    if(typeof v==='string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return new Date(v.slice(0,10)+'T00:00:00Z');
+    const n=+v;
+    if(!isNaN(n) && typeof v!=='string') return new Date(Date.UTC(1899,11,30) + Math.floor(n)*86400000);
+    const d=new Date(v); return isNaN(d)?null:d;
+  }
+  const monthGroups = {};
+  for(let i=1;i<rows.length;i++){
+    const row=rows[i]; if(!row) continue;
+    const div = String(row[colDiv]||'').trim();
+    if(!/linkage/i.test(div)) continue;
+    const d = toDate(row[colDate]); if(!d) continue;
+    const ml = d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');
+    (monthGroups[ml] = monthGroups[ml]||[]).push({row,d});
+  }
+  const monthKeys = Object.keys(monthGroups).sort();
+  const latestKey = monthKeys[monthKeys.length-1];
+  const monthsOut = {};
+  monthKeys.forEach(mk=>{
+    const entries = monthGroups[mk];
+    const [y,m] = mk.split('-').map(Number);
+    const daysInMonth = new Date(Date.UTC(y,m,0)).getUTCDate();
+    let maxDay=0;
+    const byCode={}; for(let u=1;u<=9;u++) byCode[u]=0;
+    const byProvider={};
+    entries.forEach(({row,d})=>{
+      if(d.getUTCDate()>maxDay) maxDay=d.getUTCDate();
+      const provider = String(row[colBy]||'').trim();
+      if(!provider) return;
+      if(!byProvider[provider]) byProvider[provider] = { total:0 };
+      byProvider[provider].total++;
+      const code = String(row[colCode]||'');
+      const match = code.match(/\bU(\d{1,2})\b/);
+      if(match){
+        const u = parseInt(match[1],10);
+        if(u>=1 && u<=9){
+          byCode[u] += 1;
+          byProvider[provider][u] = (byProvider[provider][u]||0)+1;
+        }
+      }
+    });
+    monthsOut[mk] = {
+      partial: (mk===latestKey) && (maxDay < daysInMonth),
+      dataThrough: `${mk}-${String(maxDay).padStart(2,'0')}`,
+      daysInMonth,
+      totalRows: entries.length,
+      byCode,
+      byProvider,
+    };
+  });
+  return monthsOut;
+}
+
 // Static catalog of every known recurring dataset across the ecosystem — not just the ones
 // this hub uploads. registryKey ties a row to a real recordImport() entry (real freshness);
 // rows with registryKey:null are uploaded/edited elsewhere and aren't wired to this registry
@@ -1281,7 +1925,9 @@ const DATA_CATALOG = [
   {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
   {registryKey:'linkage_legacy_workbook', label:'Legacy Linkage Dashboard Workbook', supaKey:'linkage_data', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub (superseded by Pimsy Notes upload)', cadenceDays:null},
   {registryKey:'director_pl', label:'QuickBooks P&L by Class', supaKey:'director_financial, director_financial_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub, Executive Dashboard', cadenceDays:30, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_financial_history, which Director Hub already reads live on every load and promotes into its own "current" snapshot automatically, no Director Hub changes needed. Director Hub’s own upload button is left in place as a fallback during the transition, not yet removed.'},
-  {registryKey:'director_klip_pimsy', label:'Klip / Pimsy Unified Import', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Director Hub', consumers:'Director Hub', cadenceDays:7, note:'Wired to this registry 9/15/26 — Director Hub now records an entry here on every Klip/Pimsy upload, same pattern as this hub’s own uploads.'},
+  {registryKey:'director_klip_pimsy', label:'Klip Billing Export', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub', cadenceDays:7, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_pimsy_history and (when newer) director_pimsy, which Director Hub already reads live on every load. Director Hub’s own upload button left in place as a fallback during the transition, not yet removed. Manager attribution still uses the original hardcoded Deb/Muneera fallback rather than this hub’s own live staff roster — Data Hub’s manager keys (Debra, no Muneera) don’t match, so wiring that up is a follow-up, not done here.'},
+  {registryKey:'director_clinweekly', label:'Weekly Clinical Goals', supaKey:'director_clinweekly', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Clinical Goals pace view)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, restricted to whichever month is most recent in the file. No confirm step; a toast reports matched/unmatched clinicians on each import.'},
+  {registryKey:'director_linkage_ucodes', label:'Linkage U-Code Outcomes', supaKey:'director_linkage_ucodes', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Linkage U-code outcomes)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, filtered to Linkage-division rows and grouped by month. No confirm step.'},
   {registryKey:null, label:'BD Leads', supaKey:'bd_leads', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: ongoing manual add/edit/delete, not a periodic file upload — a freshness date doesn’t map onto this cleanly, so left untracked here on purpose.'},
   {registryKey:null, label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: tab is still hidden/unused per Brandon (9/10/26) — not worth wiring up while dormant.'},
   {registryKey:null, label:'Optum Referral Tracker', supaKey:'linkage_optum_stories (planned)', uploadedVia:'Not yet built', consumers:'BH Linkage Hub (planned)', cadenceDays:null, note:'Listed in the architecture doc as a planned import — no upload code for this exists anywhere in current source as of 9/14/26. Confirm with Brandon whether this still needs building.'},
@@ -2028,7 +2674,7 @@ function modH(){
     ${freshnessBar}
     <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📋 Pimsy Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">One upload, fills Linkage + Courts/Jail</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the raw Pimsy Notes export (.xlsx) here — one file, one upload. U-code pipeline/revenue/G9009/outreach for Linkage and Clients/Billable Encounters for Courts/Jail are both read straight from it, most-recent-month only. (Clinical Goals is the one piece that's still a separate upload — on Director Hub, not here.) You can also drop the <strong>old Linkage Dashboard workbook</strong> here to one-time backfill real historical months (Sept 2025 onward) that the new pipeline has no other way to reconstruct.</div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the raw Pimsy Notes export (.xlsx) here — one file, one upload. U-code pipeline/revenue/G9009/outreach for Linkage and Clients/Billable Encounters for Courts/Jail are both read straight from it, most-recent-month only. <strong>Clinical Goals and Linkage U-code outcomes are also computed automatically from this same file</strong> — no separate upload, no extra confirm step; each posts its own toast when it's done. You can also drop the <strong>old Linkage Dashboard workbook</strong> here to one-time backfill real historical months (Sept 2025 onward) that the new pipeline has no other way to reconstruct.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileNotes(this)" style="font-size:12px;font-family:inherit">
       <div style="margin-top:8px">
         <button class="btn-g" style="font-size:11px" onclick="H.recomputeLinkageFromRaw()" title="Re-runs the current parser over every month's Pimsy Notes rows already on file — use this once after a Provider Scorecard change like the U1–U9 breakdown, so old months fill in without a re-upload.">🔄 Recompute Linkage from Notes on File</button>
@@ -2075,6 +2721,29 @@ function modH(){
           </div>`;}).join(''):(ct.parseError?`<div style="color:#a52d6d">${xe(ct.parseError)}</div>`:'<div style="color:#8089a8">No Courts/Jail rows found in this file.</div>')}
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevNotes=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitNotes()">Confirm Import (${lkMonths.length + ctMonths.length} month-records)</button></div>
+      </div>`;
+      })()):''}
+    </div>
+    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🎯 Klip Billing Export <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly · moved from Director Hub</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Pimsy Klipfolio billing export (.xlsx) — a genuinely separate file from the Pimsy Notes export above (different columns entirely), not a cut of it. Reads Client/Service Date/Service Code/Provider/Total Charge/Total Paid, bucketed by month, and saves straight into the shared Klip/Pimsy history Director Hub reads on every load — <strong>you can keep uploading here from now on; Director Hub's own "↑ Upload Pimsy / Notes Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake.</div>
+      <input type="file" accept=".xlsx,.xls" onchange="H.slotFileKlip(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevKlip?(M.prevKlip.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevKlip.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevKlip=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const parsed = M.prevKlip;
+        const months = Object.keys(parsed.monthly||{}).sort();
+        const monthBlocks = months.map(mk=>{
+          const m = parsed.monthly[mk];
+          const mgrRows = Object.entries(m.managers||{}).filter(([,d])=>d.staff_billed>0).map(([mgr,d])=>`<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${xe(mgr)}</span><span style="font-family:monospace">$${d.revenue.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} <span style="color:#8089a8">(${d.staff_billed} staff)</span></span></div>`).join('');
+          return `<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
+          <div style="font-weight:700;color:#1a2861;margin-bottom:4px">${xe(m.period)}${m.partial?' <span style="color:#a07e0a;font-weight:600">(partial)</span>':''} <span style="font-weight:400;color:#8089a8">— through ${xe(m.periodEndDate)}</span></div>
+          ${mgrRows}
+        </div>`;
+        }).join('');
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Klip Billing (${months.length} month${months.length!==1?'s':''} found)</div>
+        <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks||'<div style="color:#8089a8">No dated rows found in this file.</div>'}</div>
+        <div style="font-size:11px;color:#8089a8;margin-top:8px">Every month above gets snapshotted into Director Hub's Trends history. Only the most recent month (whichever has at least a few days of its own data) is promoted to Director Hub's live dashboard view — and only if it's the same period or newer than what's currently live, so an old file dropped here for backfill can't roll the live view backwards.</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevKlip=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitKlip()">Confirm Import</button></div>
       </div>`;
       })()):''}
     </div>
@@ -4935,6 +5604,107 @@ async delSRow(enc){
     const n = newEntries.length;
     const t=document.createElement('div');t.textContent=`✓ Imported P&L for ${n} month${n!==1?'s':''} (${periodLabels}) — Director Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
   },
+  // KLIP BILLING EXPORT — moved from Director Hub 9/22/26, same relocation pattern as
+  // slotFilePL/commitPL above. parseKlip() takes the raw ArrayBuffer directly (it does its own
+  // ZIP/XML reading — see the long comment above the function), not a pre-parsed sheet, so
+  // slotFileKlip doesn't route through parseXlsxNamedSheets like the other upload boxes here.
+  slotFileKlip(inp){
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); inp.value=''; return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        const parsed = await parseKlip(e.target.result);
+        parsed.sourceFilename = f.name;
+        M.prevKlip = parsed;
+        modH();
+      }catch(err){
+        M.prevKlip = {error: err.message};
+        modH();
+      }
+    };
+    r.readAsArrayBuffer(f);
+    inp.value='';
+  },
+  // Same serialized-write discipline as _plCommitChain above (see the comment there for the
+  // exact race this prevents) — every commitKlip() call in this tab fully finishes its read AND
+  // write before the next one's read starts.
+  _klipCommitChain: Promise.resolve(),
+  commitKlip(){
+    if(!M.prevKlip || M.prevKlip.error) return;
+    const parsed = M.prevKlip;
+    M.prevKlip = null;
+    render();
+    H._klipCommitChain = H._klipCommitChain.then(()=>H._commitKlipNow(parsed)).catch(err=>{
+      console.warn('[commitKlip]', err);
+      showSaveError(`Save failed — the Klip billing data for ${parsed.period||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+    });
+    return H._klipCommitChain;
+  },
+  async _commitKlipNow(parsed){
+    // Snapshot EVERY month found in the file into director_pimsy_history — mirrors Director
+    // Hub's own importUnified()/snapshotPimsyHistory() exactly, so nothing is lost even if a
+    // file happens to span a month boundary (see the long comment inside parseKlip above for
+    // the real incident that made "keep every month" the rule here).
+    const newEntries = Object.values(parsed.monthly || {}).map(klipHistoryEntryFor);
+    let existingHistory = [];
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.director_pimsy_history');
+        if(rows && rows[0] && rows[0].value){
+          const remote = JSON.parse(rows[0].value);
+          if(Array.isArray(remote)) existingHistory = remote;
+        }
+      }
+    }catch(err){ console.warn('[commitKlip] could not read existing director_pimsy_history', err); }
+    const byDate = {};
+    existingHistory.concat(newEntries).forEach(en=>{ byDate[en.date] = en; }); // new entries win on an exact-date collision, same as snapshotPimsyHistory's own dedup
+    let mergedHistory = Object.keys(byDate).map(k=>byDate[k]);
+    mergedHistory.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    mergedHistory = mergedHistory.slice(-PIMSY_HISTORY_MAX);
+
+    // Promotion to the "live" snapshot Director Hub reads for its KPI tiles/goal tracker —
+    // same isNewerOrSame gate Director Hub's own importUnified() and Supabase-pull path use,
+    // so an old backfill file dropped here can never silently roll the live view backwards.
+    let existingLive = null;
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.director_pimsy');
+        if(rows && rows[0] && rows[0].value) existingLive = JSON.parse(rows[0].value);
+      }
+    }catch(err){ console.warn('[commitKlip] could not read existing director_pimsy', err); }
+    const isNewerOrSame = !existingLive || !existingLive.periodEndDate || existingLive.period==='Unknown period' || (parsed.periodEndDate && parsed.periodEndDate >= existingLive.periodEndDate);
+    const liveToWrite = isNewerOrSame ? parsed : existingLive;
+
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        const results = await Promise.all([
+          db.upsert('appdata', {key:'director_pimsy_history', value: JSON.stringify(mergedHistory)}, 'key'),
+          isNewerOrSame ? db.upsert('appdata', {key:'director_pimsy', value: JSON.stringify(liveToWrite)}, 'key') : Promise.resolve(true),
+        ]);
+        saved = results.every(Boolean);
+      }
+    }catch(err){ saved = false; console.warn('[commitKlip] upsert failed', err); }
+
+    if(!saved){
+      showSaveError(`Save failed — the Klip billing data for ${parsed.period||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+      return;
+    }
+
+    recordImport('director_klip_pimsy', {
+      source_filename: parsed.sourceFilename || S._lastFile || null,
+      row_count: newEntries.length,
+      period_label: parsed.period || null,
+      data_through: parsed.periodEndDate || null,
+    });
+
+    render();
+    const n = newEntries.length;
+    const liveNote = isNewerOrSame ? '' : ` (kept ${existingLive.period} as the live view — this file's newest month is older)`;
+    const t=document.createElement('div');t.textContent=`✓ Imported Klip billing for ${n} month${n!==1?'s':''} (${parsed.period||'period not detected'})${liveNote} — Director Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
+  },
   slotFileLinkage(inp){
     const f=inp.files[0]; if(!f) return;
     S._lastFile=f.name;
@@ -5143,9 +5913,94 @@ async delSRow(enc){
         showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger hit an error — see console.');
       });
     }
+    // Clinical Goals + Linkage U-codes — moved from Director Hub 9/22/26, computed off this SAME
+    // raw Notes file rather than being a separate upload. Per Brandon's direction 9/22/26 ("upload
+    // in the data staff hub and it parse to the respective hub"), there is deliberately no
+    // confirm/preview gate for either of these — they fire automatically off this same Confirm
+    // Import click, independently of each other and of the Linkage/Courts commit above (already
+    // done by this point), each on its own serialized chain so back-to-back uploads in this tab
+    // can't race each other the same way _plCommitChain protects against for P&L. A slow/failed
+    // write here never blocks or rolls back the primary Linkage/Courts import; it surfaces its
+    // own toast instead.
+    if(p.rawRows && p.rawRows.length){
+      H._clinGoalsCommitChain = H._clinGoalsCommitChain.then(()=>H._commitClinGoalsFromNotes(p.rawRows)).catch(err=>{
+        console.warn('[commitClinGoals]', err);
+        showSaveError('Linkage/Courts imported fine, but updating Clinical Goals failed to save. Try re-uploading this file.');
+      });
+      H._linkageUcodesCommitChain = H._linkageUcodesCommitChain.then(()=>H._commitLinkageUcodesFromNotes(p.rawRows)).catch(err=>{
+        console.warn('[commitLinkageUcodes]', err);
+        showSaveError('Linkage/Courts imported fine, but updating Linkage U-code outcomes failed to save. Try re-uploading this file.');
+      });
+    }
     M.prevNotes = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported Linkage (${lkMonthCount-lkSkipped} month${lkMonthCount-lkSkipped!==1?'s':''}${lkSkipped?`, ${lkSkipped} skipped — already on file`:''}) + ${courtsN} Courts/Jail record${courtsN!==1?'s':''} across ${courtsMonthCount} month${courtsMonthCount!==1?'s':''}${ctSkipped?` (${ctSkipped} skipped)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
+  },
+  // Same serialized-write pattern as _plCommitChain/_klipCommitChain — see the comment on
+  // _plCommitChain above for the exact race this prevents.
+  _clinGoalsCommitChain: Promise.resolve(),
+  async _commitClinGoalsFromNotes(rawRows){
+    let parsed;
+    try{ parsed = parseClinicalNotesExport(rawRows); }
+    catch(err){ console.warn('[parseClinicalNotesExport]', err); return; }
+    // Full-overwrite single-month pace snapshot — matches Director Hub's own
+    // pushClinWeeklyToSupabase()/confirmClinWeeklyImport() write shape exactly (not a history:
+    // each upload replaces the whole thing with whichever month is most recent in the file).
+    const payload = { updatedAt: new Date().toISOString(), data: {} };
+    parsed.matched.forEach(m=>{ payload.data[m.key] = m; });
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        saved = await db.upsert('appdata', {key:'director_clinweekly', value: JSON.stringify(payload)}, 'key');
+      }
+    }catch(err){ saved = false; console.warn('[commitClinGoals] upsert failed', err); }
+    if(!saved){
+      showSaveError('Linkage/Courts imported fine, but updating Clinical Goals failed to save. Try re-uploading this file.');
+      return;
+    }
+    recordImport('director_clinweekly', {
+      source_filename: S._lastFile || null,
+      row_count: parsed.matched.length,
+    });
+    const n = parsed.matched.length, u = parsed.unmatched.length;
+    const t=document.createElement('div');t.textContent=`✓ Clinical Goals updated — ${n} clinician${n!==1?'s':''} matched${u?`, ⚠️ ${u} unmatched name${u!==1?'s':''} (${parsed.unmatched.slice(0,3).join(', ')}${u>3?'…':''})`:''}`;t.style.cssText=`position:fixed;top:${u?68:20}px;right:20px;background:${u?'#a07e0a':'#1B5E20'};color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2);max-width:360px`;document.body.appendChild(t);setTimeout(()=>t.remove(),4200);
+  },
+  _linkageUcodesCommitChain: Promise.resolve(),
+  async _commitLinkageUcodesFromNotes(rawRows){
+    let parsedMonths;
+    try{ parsedMonths = parseLinkageUcodeNotes(rawRows); }
+    catch(err){ console.warn('[parseLinkageUcodeNotes]', err); return; }
+    let existing = {};
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.director_linkage_ucodes');
+        if(rows && rows[0] && rows[0].value){
+          const remote = JSON.parse(rows[0].value);
+          if(remote && typeof remote==='object') existing = remote;
+        }
+      }
+    }catch(err){ console.warn('[commitLinkageUcodes] could not read existing director_linkage_ucodes', err); }
+    // New upload's months win on conflict, existing months preserved — same merge behavior as
+    // Director Hub's own importUnified() (LINKAGE_UCODES = {...LINKAGE_UCODES, ...parsedMonths}).
+    const merged = {...existing, ...parsedMonths};
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        saved = await db.upsert('appdata', {key:'director_linkage_ucodes', value: JSON.stringify(merged)}, 'key');
+      }
+    }catch(err){ saved = false; console.warn('[commitLinkageUcodes] upsert failed', err); }
+    if(!saved){
+      showSaveError('Linkage/Courts imported fine, but updating Linkage U-code outcomes failed to save. Try re-uploading this file.');
+      return;
+    }
+    const monthKeys = Object.keys(parsedMonths);
+    recordImport('director_linkage_ucodes', {
+      source_filename: S._lastFile || null,
+      row_count: monthKeys.length,
+      period_label: monthKeys.sort().pop() || null,
+    });
+    const n = monthKeys.length;
+    const t=document.createElement('div');t.textContent=`✓ Linkage U-code outcomes updated — ${n} month${n!==1?'s':''}`;t.style.cssText='position:fixed;top:116px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
   },
   // One-time (or whenever-you-need-it) re-run of computeLinkageMonthFromRows over every month
   // already on file in S.linkageNotesRaw, without needing a brand-new Pimsy Notes upload. Added
