@@ -4840,7 +4840,7 @@ async delSRow(enc){
   slotFilePL(inp){
     const f=inp.files[0]; if(!f) return;
     S._lastFile=f.name;
-    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); return; }
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); inp.value=''; return; }
     const r=new FileReader();
     r.onload=async e=>{
       try{
@@ -4857,10 +4857,36 @@ async delSRow(enc){
       }
     };
     r.readAsArrayBuffer(f);
+    inp.value=''; // lets the same filename be dropped again later (e.g. a corrected re-export) and re-fire onchange
   },
-  async commitPL(){
+  // FIX (9/22/26, same day as the relocation itself): commitPL()'s read-existing-history / merge
+  // / write-back is NOT atomic — it's a plain read, then a separate write, a few hundred ms apart.
+  // Uploading two months back-to-back (confirm July, then immediately drop+confirm August before
+  // July's write had actually landed) let the second call's "read existing history" run BEFORE
+  // the first call's write finished — so the second call built its merge from history that didn't
+  // yet include the first upload's month, and its own write then overwrote the first one outright.
+  // Net effect: the earlier month silently reverted to whatever was in Supabase before either
+  // upload (in Brandon's case, an old incomplete/partial entry from before this feature existed),
+  // while the later month landed correctly — exactly the "July shows Gross Margin only" symptom
+  // seen after uploading July then August in quick succession. _plCommitChain forces every
+  // commitPL() call in this browser tab to fully finish (read AND write) before the next one's
+  // read starts, so two uploads done back-to-back are always strictly sequential, never racing.
+  // This doesn't protect against a genuinely concurrent write from a second tab/device — nothing
+  // in this hub's simple appdata-blob pattern does — but that's a pre-existing, much rarer risk
+  // shared by every upload in this file, not something new introduced here.
+  _plCommitChain: Promise.resolve(),
+  commitPL(){
     if(!M.prevPL || M.prevPL.error) return;
     const parsed = M.prevPL;
+    M.prevPL = null; // clear immediately so this exact upload can't be double-submitted by a second click
+    render();
+    H._plCommitChain = H._plCommitChain.then(()=>H._commitPLNow(parsed)).catch(err=>{
+      console.warn('[commitPL]', err);
+      showSaveError(`Save failed — the P&L for ${parsed.period||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+    });
+    return H._plCommitChain;
+  },
+  async _commitPLNow(parsed){
     const newEntries = (parsed.monthly && parsed.monthly.length)
       ? parsed.monthly.map(m=>plHistoryEntryFor(m.period, m.divisions, m.adminPool, m.totalRev))
       : [plHistoryEntryFor(parsed.period, parsed.divisions, parsed.adminPool, parsed.totalRev)];
@@ -4905,7 +4931,6 @@ async delSRow(enc){
       data_through: newEntries[newEntries.length-1].period,
     });
 
-    M.prevPL = null;
     render();
     const n = newEntries.length;
     const t=document.createElement('div');t.textContent=`✓ Imported P&L for ${n} month${n!==1?'s':''} (${periodLabels}) — Director Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
