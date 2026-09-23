@@ -741,9 +741,14 @@ async function syncFromSupabase(){
       };
       const backfilled=staff.map(s=>({...s,...seedDefaults(s)}));
       const savedIds=new Set(staff.map(s=>s.id));
-      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id));
+      // Crisis Center rows are excluded from the re-add: the Crisis Center hub owns them, so a
+      // person it deleted must not be resurrected from this file's default roster.
+      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id)&&!isCCOwned(s));
       S.staff = missingFromDefault.length ? [...backfilled, ...missingFromDefault] : backfilled;
-      sv('s',S.staff);
+      // Only write back when this load actually changed something. Writing the whole roster on
+      // every page open was a standing last-write-wins risk against saves from the other hubs.
+      if(JSON.stringify(S.staff)!==JSON.stringify(staff)) sv('s',S.staff);
+      else { try{localStorage.setItem('ths_s',JSON.stringify(S.staff));}catch(e){} }
     }
     const pd=parse('pd');if(pd&&Object.keys(pd).length>0){S.pd=pd;sv('p',S.pd);}
     const up=parse('uploads');if(up){Object.entries(up).forEach(([p,v])=>{S.up[p]={...(S.up[p]||{}),...v};});sv('up',S.up);}
@@ -2000,6 +2005,13 @@ function initStaff(){
 // stale array and silently overwrite every addition/change made elsewhere in the meantime.
 // freshStaff() pulls the current roster straight from Supabase immediately before a write, so
 // each edit applies on top of what's actually there right now instead of a stale snapshot.
+// OWNERSHIP (9/23/26): Crisis Center staff records are owned by the Crisis Center hub, which runs
+// differently from the rest of the org (shifts, schedule, sign-in email, roles). This hub shows
+// them read-only and refuses to write to them, so an edit here can't overwrite what the Crisis
+// Center hub keeps. Transfers INTO Crisis Center (manager -> David) are still allowed from here so an
+// existing person keeps their Pimsy ID; setup then finishes in the Crisis Center hub.
+const CC_OWNED_MSG='Crisis Center staff are managed in the Crisis Center hub — make this change there.';
+function isCCOwned(s){return !!s && s.program==='Crisis Center';}
 async function freshStaff(){
   const rows=await db.get('appdata','key=eq.staff&select=value');
   if(rows&&rows[0]&&rows[0].value){
@@ -2456,14 +2468,16 @@ function encRow(s){return btoa(unescape(encodeURIComponent(JSON.stringify(s))));
 function decRow(enc){return JSON.parse(decodeURIComponent(escape(atob(enc))));}
 function setV(){
   const fm=S.setMgr,fs=S.setStat,fd=S.setDir;
-  const scopedStaff=S.staff.filter(s=>SETTINGS_MGRS.includes(s.mgr));
+  // Crisis Center rows always show (read-only), even if their mgr field is blank or stale.
+  const scopedStaff=S.staff.filter(s=>SETTINGS_MGRS.includes(s.mgr)||isCCOwned(s));
+  const mgrOf=s=>isCCOwned(s)?'David':s.mgr;
   // NEW (9/1): Director filter, scoping the Manager dropdown to that director's own managers —
   // Avril -> Rachel/Jessica/Angelica, Sarah -> Brian/Cara/John/Luke, Brandon -> David (per DIR
   // above). Built from DIR[x].mgrs directly rather than a new hardcoded list, so it can never
   // drift out of sync with the manager assignments already used everywhere else in this file.
   const dirOptions=Object.keys(DIR).filter(d=>(DIR[d].mgrs||[]).some(m=>SETTINGS_MGRS.includes(m)));
   const mgrsForDir=fd&&DIR[fd]?DIR[fd].mgrs.filter(m=>SETTINGS_MGRS.includes(m)):SETTINGS_MGRS;
-  const fil=scopedStaff.filter(s=>(!fd||mgrsForDir.includes(s.mgr))&&(!fm||s.mgr===fm)&&(!fs||s.status===fs));
+  const fil=scopedStaff.filter(s=>(!fd||mgrsForDir.includes(mgrOf(s)))&&(!fm||mgrOf(s)===fm)&&(!fs||(s.status||'Active')===fs));
   const mo=mgrsForDir.map(m=>`<option value="${m}"${fm===m?' selected':''}>${MGR[m].full}</option>`).join('');
   const dopts=`<option value="">All Directors</option>`+dirOptions.map(d=>`<option value="${d}"${fd===d?' selected':''}>${xe(DIR[d].full)}</option>`).join('');
   const tg=S.tgt;
@@ -2471,16 +2485,16 @@ function setV(){
   // directors should be able to change the roster). Locked = plain text + no action buttons;
   // unlocked = the original editable controls. Reading the roster is unaffected either way.
   const locked=editLocked();
-  const rows=fil.map((s,i)=>{const defHrs=s.tp==='FT'?tg.ftHours:tg.ptHours;const defCas=s.tp==='FT'?tg.caseloadFT:tg.caseloadPT;
-    const mgrCell=locked?`<span>${xe(MGR[s.mgr]?.full||s.mgr||'—')}</span>`:`<select onchange="H.upS(${s.id},'mgr',this.value)" style="font-size:12px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;background:#fff;font-family:inherit;max-width:140px">${SETTINGS_MGRS.map(m=>`<option value="${m}"${s.mgr===m?' selected':''}>${MGR[m].full}</option>`).join('')}</select>`;
-    const tpCell=locked?`<span class="bdg" style="background:${s.tp==='FT'?'#DBEAFE':'#F3F4F6'};color:${s.tp==='FT'?'#1D4ED8':'#6B7280'}">${s.tp}</span>`:`<select onchange="H.upS(${s.id},'tp',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;background:${s.tp==='FT'?'#DBEAFE':'#F3F4F6'};color:${s.tp==='FT'?'#1D4ED8':'#6B7280'};font-family:inherit;font-weight:700"><option value="FT"${s.tp==='FT'?' selected':''}>FT</option><option value="PT"${s.tp==='PT'?' selected':''}>PT</option></select>`;
-    const regCell=locked?`<span>${xe(s.reg||'—')}</span>`:`<input type="text" value="${xe(s.reg||'')}" onchange="H.upS(${s.id},'reg',this.value)" placeholder="Region" style="width:80px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
-    const genderCell=locked?`<span>${xe(s.gender||'—')}</span>`:`<select onchange="H.upS(${s.id},'gender',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"><option value=""${!s.gender?' selected':''}>—</option><option value="Female"${s.gender==='Female'?' selected':''}>Female</option><option value="Male"${s.gender==='Male'?' selected':''}>Male</option></select>`;
-    const cityCell=locked?`<span>${xe(s.city||'—')}</span>`:`<input type="text" value="${xe(s.city||'')}" onchange="H.upS(${s.id},'city',this.value)" placeholder="City" style="width:95px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
-    const countyCell=locked?`<span>${xe(s.county||'—')}</span>`:`<input type="text" value="${xe(s.county||'')}" onchange="H.upS(${s.id},'county',this.value)" placeholder="County" style="width:85px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
-    const zipCell=locked?`<span>${xe(s.zip||'—')}</span>`:`<input type="text" value="${xe(s.zip||'')}" onchange="H.upS(${s.id},'zip',this.value)" placeholder="Zip" style="width:60px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
-    const noteCell=locked?`<span>${xe(s.nt||'—')}</span>`:`<input type="text" value="${xe(s.nt||'').replace(/"/g,'&quot;')}" onchange="H.upS(${s.id},'nt',this.value)" placeholder="Add note…" style="width:150px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#3e4a78" />`;
-    const actionCell=locked?'':`<button onclick="H.tgS(${s.id})" style="font-size:10px;padding:2px 7px;background:${s.status==='Active'?'#FEE2E2':'#C8E6C9'};color:${s.status==='Active'?'#991B1B':'#1B5E20'};border:none;border-radius:3px;cursor:pointer;font-family:inherit">${s.status==='Active'?'Deactivate':'Activate'}</button>${s.status==='Inactive'?` <button onclick="H.delS(${s.id})" title="Permanently remove — frees this Pimsy ID for reuse. Only for fixing a bad entry, not for someone who actually left (Deactivate keeps their history for that)." style="font-size:10px;padding:2px 7px;background:#fff;color:#991B1B;border:1px solid #991B1B;border-radius:3px;cursor:pointer;font-family:inherit;margin-left:4px">Delete</button>`:''}`;
+  const rows=fil.map((s,i)=>{const ro=locked||isCCOwned(s);const defHrs=s.tp==='FT'?tg.ftHours:tg.ptHours;const defCas=s.tp==='FT'?tg.caseloadFT:tg.caseloadPT;
+    const mgrCell=ro?`<span>${xe(MGR[s.mgr]?.full||s.mgr||'—')}</span>`:`<select onchange="H.upS(${s.id},'mgr',this.value)" style="font-size:12px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;background:#fff;font-family:inherit;max-width:140px">${SETTINGS_MGRS.map(m=>`<option value="${m}"${s.mgr===m?' selected':''}>${MGR[m].full}</option>`).join('')}</select>`;
+    const tpCell=ro?`<span class="bdg" style="background:${s.tp==='FT'?'#DBEAFE':'#F3F4F6'};color:${s.tp==='FT'?'#1D4ED8':'#6B7280'}">${s.tp}</span>`:`<select onchange="H.upS(${s.id},'tp',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;background:${s.tp==='FT'?'#DBEAFE':'#F3F4F6'};color:${s.tp==='FT'?'#1D4ED8':'#6B7280'};font-family:inherit;font-weight:700"><option value="FT"${s.tp==='FT'?' selected':''}>FT</option><option value="PT"${s.tp==='PT'?' selected':''}>PT</option></select>`;
+    const regCell=ro?`<span>${xe(s.reg||'—')}</span>`:`<input type="text" value="${xe(s.reg||'')}" onchange="H.upS(${s.id},'reg',this.value)" placeholder="Region" style="width:80px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
+    const genderCell=ro?`<span>${xe(s.gender||'—')}</span>`:`<select onchange="H.upS(${s.id},'gender',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"><option value=""${!s.gender?' selected':''}>—</option><option value="Female"${s.gender==='Female'?' selected':''}>Female</option><option value="Male"${s.gender==='Male'?' selected':''}>Male</option></select>`;
+    const cityCell=ro?`<span>${xe(s.city||'—')}</span>`:`<input type="text" value="${xe(s.city||'')}" onchange="H.upS(${s.id},'city',this.value)" placeholder="City" style="width:95px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
+    const countyCell=ro?`<span>${xe(s.county||'—')}</span>`:`<input type="text" value="${xe(s.county||'')}" onchange="H.upS(${s.id},'county',this.value)" placeholder="County" style="width:85px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
+    const zipCell=ro?`<span>${xe(s.zip||'—')}</span>`:`<input type="text" value="${xe(s.zip||'')}" onchange="H.upS(${s.id},'zip',this.value)" placeholder="Zip" style="width:60px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
+    const noteCell=ro?`<span>${xe(s.nt||'—')}</span>`:`<input type="text" value="${xe(s.nt||'').replace(/"/g,'&quot;')}" onchange="H.upS(${s.id},'nt',this.value)" placeholder="Add note…" style="width:150px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#3e4a78" />`;
+    const actionCell=isCCOwned(s)?`<span class="bdg" style="background:#FCE7F3;color:#9D174D;border:1px solid #F9A8D4" title="Crisis Center staff are edited in the Crisis Center hub">Managed in Crisis Center hub</span>`:locked?'':`<button onclick="H.tgS(${s.id})" style="font-size:10px;padding:2px 7px;background:${s.status==='Active'?'#FEE2E2':'#C8E6C9'};color:${s.status==='Active'?'#991B1B':'#1B5E20'};border:none;border-radius:3px;cursor:pointer;font-family:inherit">${s.status==='Active'?'Deactivate':'Activate'}</button>${s.status==='Inactive'?` <button onclick="H.delS(${s.id})" title="Permanently remove — frees this Pimsy ID for reuse. Only for fixing a bad entry, not for someone who actually left (Deactivate keeps their history for that)." style="font-size:10px;padding:2px 7px;background:#fff;color:#991B1B;border:1px solid #991B1B;border-radius:3px;cursor:pointer;font-family:inherit;margin-left:4px">Delete</button>`:''}`;
     return`<tr style="background:${i%2===0?'#fff':'#FAFAFA'}">
       <td style="font-family:monospace;font-size:11px;color:#8089a8">${s.id}</td>
       <td style="font-weight:500;color:#1a2861">${xe(s.fn)} ${xe(s.ln)}</td>
@@ -5119,6 +5133,7 @@ async tgS(id){
   if(base.filter(s=>s.id===id).length>1){showSaveError(`Pimsy ID ${id} is used by more than one roster row — this button can't safely target just one. Use the "Deactivate this row" button in the duplicate-name warning above the roster instead.`);return;}
   const staff=base.find(s=>s.id===id)||S.staff.find(s=>s.id===id);
   if(!staff)return;
+  if(isCCOwned(staff)){showSaveError(CC_OWNED_MSG);return;}
   const newStatus=staff.status==='Active'?'Inactive':'Active';
   S.staff=base.map(s=>s.id===id?{...s,status:newStatus}:s);
   renderV();
@@ -5171,6 +5186,7 @@ async delS(id){
   if(base.filter(s=>s.id===id).length>1){showSaveError(`Pimsy ID ${id} is used by more than one roster row — this button can't safely target just one. Use the "Delete this row" button in the duplicate-name warning above the roster instead.`);return;}
   const staff=base.find(s=>s.id===id)||S.staff.find(s=>s.id===id);
   if(!staff)return;
+  if(isCCOwned(staff)){showSaveError(CC_OWNED_MSG);return;}
   if(staff.status!=='Inactive'){alert('Only an Inactive staff member can be deleted. Deactivate them first.');return;}
   if(!confirm(`Permanently delete ${staff.fn} ${staff.ln} (Pimsy ID ${staff.id})?\n\nThis is different from Deactivate — it removes their record entirely, including note history, and frees up Pimsy ID ${staff.id} to be reused. Only do this to correct a bad entry (e.g. a mistyped ID), not for someone who actually left.`))return;
   S.staff=base.filter(s=>s.id!==id);
@@ -5213,6 +5229,7 @@ async tgSRow(enc){
   if(matches.length>1){showSaveError(`Found ${matches.length} identical rows for ${target.fn} ${target.ln} — can't tell them apart safely. Edit a field (like the region) on one of them first so they differ, then try again.`);return;}
   const idx=base.indexOf(matches[0]);
   const staff=matches[0];
+  if(isCCOwned(staff)){showSaveError(CC_OWNED_MSG);return;}
   const newStatus=staff.status==='Active'?'Inactive':'Active';
   const newArr=base.slice();newArr[idx]={...staff,status:newStatus};
   S.staff=newArr;
@@ -5258,6 +5275,7 @@ async delSRow(enc){
   if(matches.length===0){showSaveError(`Couldn't find that exact row anymore — it may have already been changed. Refresh and try again.`);return;}
   if(matches.length>1){showSaveError(`Found ${matches.length} identical rows for ${target.fn} ${target.ln} — can't tell them apart safely. Edit a field on one of them first so they differ, then try again.`);return;}
   const staff=matches[0];
+  if(isCCOwned(staff)){showSaveError(CC_OWNED_MSG);return;}
   if(staff.status!=='Inactive'){alert('Only an Inactive row can be deleted. Deactivate this exact row first.');return;}
   if(!confirm(`Permanently delete this one row for ${staff.fn} ${staff.ln} — Pimsy ID ${staff.id}, ${staff.reg||'no region'}, manager ${MGR[staff.mgr]?.full||staff.mgr||'none'}?\n\nOnly this specific row is removed — the other row sharing this ID (if it's the real, current one) is left untouched.`))return;
   const idx=base.indexOf(staff);
@@ -5299,6 +5317,9 @@ async delSRow(enc){
       showSaveError(`Couldn't save that change — this staff member no longer appears on the shared roster. Refresh the page before making more changes.`);
       return;
     }
+    if(isCCOwned(staff)){renderV();showSaveError(CC_OWNED_MSG);return;}
+    const transferringToCC=(field==='mgr'&&MGR[value]&&MGR[value].prog==='Crisis Center');
+    if(transferringToCC&&!confirm(`Move ${staff.fn} ${staff.ln} to Crisis Center?\n\nAfter this, their record is managed only in the Crisis Center hub. Finish setting them up there — sign-in email, role, and shift — or they won't be able to sign in.`)){renderV();return;}
     S.staff=base.map(s=>{
       if(s.id!==id)return s;
       const patch={[field]:value};
@@ -5310,7 +5331,9 @@ async delSRow(enc){
       S.staff=prevStaff;
       renderV();
       showSaveError(`Couldn't save that change for ${staff.fn} ${staff.ln} — nothing was saved. Try again, and check your connection if it keeps failing.`);
+      return;
     }
+    if(transferringToCC)renderV();
   },
   ssM(v){S.setMgr=v;renderV();},
   ssS(v){S.setStat=v;renderV();},
@@ -6351,6 +6374,7 @@ async delSRow(enc){
     const reg=document.getElementById('sr')?.value.trim();
     if(isNaN(id)||id<=0){alert('Pimsy ID is required.');return;}
     if(!fn||!ln){alert('First and last name are required.');return;}
+    if(MGR[mgr]&&MGR[mgr].prog==='Crisis Center'){alert('New Crisis Center staff are added in the Crisis Center hub (Staff Roster → + Add Staff), which also sets their sign-in email, role, and shift.');return;}
     const btn=document.getElementById('addStaffBtn');
     if(btn){btn.disabled=true;btn.textContent='Checking…';}
     const prevStaff=S.staff;
