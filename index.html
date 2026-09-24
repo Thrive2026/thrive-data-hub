@@ -1934,8 +1934,8 @@ const DATA_CATALOG = [
   {registryKey:'director_clinweekly', label:'Weekly Clinical Goals', supaKey:'director_clinweekly', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Clinical Goals pace view)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, restricted to whichever month is most recent in the file. No confirm step; a toast reports matched/unmatched clinicians on each import.'},
   {registryKey:'director_linkage_ucodes', label:'Linkage U-Code Outcomes', supaKey:'director_linkage_ucodes', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Linkage U-code outcomes)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, filtered to Linkage-division rows and grouped by month. No confirm step.'},
   {registryKey:null, label:'BD Leads', supaKey:'bd_leads', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: ongoing manual add/edit/delete, not a periodic file upload — a freshness date doesn’t map onto this cleanly, so left untracked here on purpose.'},
-  {registryKey:null, label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: tab is still hidden/unused per Brandon (9/10/26) — not worth wiring up while dormant.'},
-  {registryKey:null, label:'Optum Referral Tracker', supaKey:'linkage_optum_stories (planned)', uploadedVia:'Not yet built', consumers:'BH Linkage Hub (planned)', cadenceDays:null, note:'Listed in the architecture doc as a planned import — no upload code for this exists anywhere in current source as of 9/14/26. Confirm with Brandon whether this still needs building.'},
+  {registryKey:'bd_referrals', label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Data & Staff Hub (moved 9/24/26)', consumers:'BD Dashboard', cadenceDays:null, note:"Moved here 9/24/26 per Brandon's centralization direction. Referral Volume tab itself is still hidden in BD Dashboard (per Brandon 9/10/26) pending real UX work — this upload just gives the CSV import one home instead of two, so whenever that tab is rebuilt the data is already flowing through here."},
+  {registryKey:'optum_sla', label:'Optum SLA & Disenrollment (Referral Export)', supaKey:'linkage_optum_actuals', uploadedVia:'Data & Staff Hub (moved 9/24/26)', consumers:'BH Linkage Hub (Optum SLA tab), Director Hub (ROI/Cost Trends)', cadenceDays:30, note:"Moved here 9/24/26 per Brandon's centralization direction — was previously only in Linkage Hub. Reads the Optum referral-tracker export's ADT Notification Received Date / Follow-Up Within 24 Business Hours / Disenrollment Date columns, aggregates by month, and merges into the same linkage_optum_actuals key Linkage Hub already reads live. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance remain manual entry in Linkage Hub — no source column for those in this export."},
 ];
 function catalogFreshness(entry, cadenceDays){
   if(!entry || !entry.uploaded_at) return {label:'Never uploaded', cls:'bad'};
@@ -2821,6 +2821,41 @@ function modH(){
         ${parsed.mismatchWarning?`<div style="font-size:11px;color:#92400E;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:8px 10px;margin-top:8px">⚠ ${xe(parsed.mismatchWarning)}</div>`:''}
         <div style="font-size:11px;color:#8089a8;margin-top:8px">This replaces (by period) any existing entry for the same month${months.length>1?'s':''} in Director Hub's financial history — a re-upload corrects that month rather than duplicating it. Director Hub decides which month becomes "current" on its own next load; this upload doesn't set that directly.</div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitPL()">Confirm Import</button></div>
+      </div>`;
+      })()):''}
+    </div>
+    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔗 Optum SLA &amp; Disenrollment <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Linkage Hub</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Optum referral-tracker export (.xlsx) — reads ADT Notification Received Date, Follow-Up Within 24 Business Hours (Y/N), Disenrollment Trigger, and Disenrollment Date, aggregates by month, and merges straight into the shared Optum SLA data Linkage Hub already reads live. <strong>You can keep uploading here from now on; Linkage Hub's own "↑ Upload Referral Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance stay manual entry in Linkage Hub — this export has no column for those.</div>
+      <input type="file" accept=".xlsx,.xls" onchange="H.slotFileOptum(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevOptum?(M.prevOptum.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevOptum.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(M.prevOptum.months.length===0?`<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#92400E">No rows in ${xe(M.prevOptum.sourceFilename)} had a usable ADT Notification Received Date or Disenrollment Date — nothing to import.</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const parsed = M.prevOptum;
+        const monthBlocks = parsed.months.map(mo=>{
+          const b = parsed.byMonth[mo];
+          const pct = b.followupTotal>0 ? Math.round((b.followupYes/b.followupTotal)*100) : null;
+          return `<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
+          <div style="font-weight:700;color:#1a2861;margin-bottom:2px">${xe(mo)}</div>
+          <div>${pct!=null?`Discharge follow-up: <strong>${pct}%</strong> (${b.followupYes}/${b.followupTotal})`:'No follow-up rows this month'} · Disenrollments: <strong>${b.disenrolled.length}</strong></div>
+        </div>`;
+        }).join('');
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Optum SLA (${parsed.dataRowCount} referral row${parsed.dataRowCount!==1?'s':''}, ${parsed.months.length} month${parsed.months.length!==1?'s':''})</div>
+        <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks}</div>
+        <div style="font-size:11px;color:#8089a8;margin-top:8px">This merges into whatever's already on file for each month above — existing fields not covered by this export (time-to-assignment, time-to-first-contact, 4-async/1-sync) are left untouched.</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitOptum()">Confirm Import</button></div>
+      </div>`;
+      })())):''}
+    </div>
+    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📣 BD Referral Volume <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Ad hoc · moved from BD Dashboard</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop a referral-volume CSV export (Org, Region, then the 8 category counts, optional Notes column, optional header row) — merges by organization name, adding to any existing counts rather than replacing them. BD Dashboard's own Referral Volume tab is currently hidden pending UX work, so this is the one place this data lands for now; it'll be there waiting whenever that tab comes back.</div>
+      <input type="file" accept=".csv" onchange="H.slotFileBdRef(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevBdRef?(M.prevBdRef.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevBdRef.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevBdRef=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const parsed = M.prevBdRef;
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — BD Referral Volume</div>
+        <div style="font-size:12px;color:#3e4a78">✅ ${parsed.rows.length} organization row${parsed.rows.length!==1?'s':''} read${parsed.skipped?` · ⚠️ ${parsed.skipped} row${parsed.skipped!==1?'s':''} skipped (missing an organization name)`:''}</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevBdRef=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitBdRef()">Confirm Import</button></div>
       </div>`;
       })()):''}
     </div>
@@ -4076,6 +4111,121 @@ async function parseXlsxNamedSheets(buf, wantedNamePatterns){
     out[sname]=rows;
   }
   return out;
+}
+
+// ══════════════════════════════════════════════════════════
+// OPTUM SLA & DISENROLLMENT EXPORT — moved here from Linkage Hub (linkage-hub.html) on 9/24/26,
+// per Brandon's centralization direction. This is a close port of Linkage Hub's own
+// importOptumSlaExport() and its small helpers (optumSlaHeaderIndex/optumSlaCol/optumSlaTruthy/
+// optumSlaParseDate/optumSlaMonthKey) — same column-matching logic, same month aggregation. Two
+// real differences from the original: (1) it reuses THIS hub's own parseXlsxNamedSheets rather
+// than a duplicate reader, which already converts date-styled cells straight to JS Date objects
+// (see excelSerialToDate above) instead of Linkage's separate keepFullDate flag, so
+// optumSlaParseDate here has an added `raw instanceof Date` branch to match; and (2) there's no
+// on-page Optum SLA view to re-render afterward, so this just writes to Supabase and shows a
+// toast — Linkage Hub picks the new numbers up on its own next load, exactly like the Klip/P&L
+// moves above.
+// ══════════════════════════════════════════════════════════
+function optumSlaHeaderIndex(headerRow){
+  const idx={};
+  headerRow.forEach((h,i)=>{
+    const norm = String(h||'').trim().toLowerCase().replace(/\s+/g,' ');
+    if(norm) idx[norm]=i;
+  });
+  return idx;
+}
+function optumSlaCol(idx, name){ return idx[name.trim().toLowerCase().replace(/\s+/g,' ')]; }
+function optumSlaTruthy(v){ return /^(y|yes|true|1)$/i.test(String(v==null?'':v).trim()); }
+function optumSlaParseDate(raw){
+  if(raw==null || raw==='') return null;
+  if(raw instanceof Date) return isNaN(raw) ? null : raw.toISOString().slice(0,10); // this hub's parseXlsxNamedSheets returns real Date objects for date-styled cells
+  if(typeof raw==='string' && /^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0,10);
+  if(typeof raw==='number' && raw>20000 && raw<80000){
+    const epoch=new Date(Date.UTC(1899,11,30));
+    return new Date(epoch.getTime()+Math.floor(raw)*86400000).toISOString().slice(0,10);
+  }
+  if(typeof raw==='string'){
+    const d = new Date(raw);
+    if(!isNaN(d.getTime())) return d.toISOString().slice(0,10);
+  }
+  return null;
+}
+function optumSlaMonthKey(dateStr){
+  if(!dateStr) return null;
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}` : null;
+}
+function parseOptumSlaWorkbook(sheets, fileName){
+  const sheetName = Object.keys(sheets)[0];
+  const rows = sheetName ? sheets[sheetName] : null;
+  if(!rows || rows.length < 1) throw new Error('No sheets found in this file.');
+  const idx = optumSlaHeaderIndex(rows[0]);
+  const cAdt = optumSlaCol(idx,'ADT Notification Received Date');
+  const cFollowup = optumSlaCol(idx,'Follow-Up Within 24 Business Hours (Y/N)');
+  const cDisenrollTrigger = optumSlaCol(idx,'Disenrollment Trigger');
+  const cDisenrollDate = optumSlaCol(idx,'Disenrollment Date');
+  if(cAdt==null || cFollowup==null || cDisenrollDate==null){
+    throw new Error('Expected columns not found (ADT Notification Received Date / Follow-Up Within 24 Business Hours / Disenrollment Date) — is this the referral tracker template?');
+  }
+  const cFirst = optumSlaCol(idx,'Member Name First'), cLast = optumSlaCol(idx,'Member Name Last');
+  const dataRows = rows.slice(1).filter(r => (cFirst!=null && r[cFirst]!==''&&r[cFirst]!=null) || (cLast!=null && r[cLast]!==''&&r[cLast]!=null));
+  const byMonth = {};
+  const ensure = (mo) => byMonth[mo] || (byMonth[mo] = { followupTotal:0, followupYes:0, disenrolled:[] });
+  dataRows.forEach(r=>{
+    const adtDate = optumSlaParseDate(r[cAdt]);
+    const adtMonth = optumSlaMonthKey(adtDate);
+    if(adtMonth && r[cFollowup]!==''&&r[cFollowup]!=null){
+      const b = ensure(adtMonth);
+      b.followupTotal++;
+      if(optumSlaTruthy(r[cFollowup])) b.followupYes++;
+    }
+    const disDate = optumSlaParseDate(r[cDisenrollDate]);
+    const disMonth = optumSlaMonthKey(disDate);
+    if(disMonth){
+      const b = ensure(disMonth);
+      b.disenrolled.push({ date: disDate, trigger: cDisenrollTrigger!=null ? r[cDisenrollTrigger] : '' });
+    }
+  });
+  const months = Object.keys(byMonth).sort();
+  return { byMonth, months, dataRowCount: dataRows.length, sourceFilename: fileName };
+}
+
+// ══════════════════════════════════════════════════════════
+// BD REFERRAL VOLUME CSV IMPORT — moved here from BD Dashboard (business-development.html) on
+// 9/24/26, per Brandon's centralization direction. Byte-for-byte the same parsing rules as BD
+// Dashboard's own bdImportReferralCsv() (org name + region + 8 fixed category counts + notes,
+// comma-separated, optional header row) — just reading into a plain object here instead of BD
+// Dashboard's in-memory REFERRALS array, since this hub has no Referral Volume view of its own.
+// BD_REFERRAL_CATEGORIES below is a copy of BD Dashboard's REFERRAL_CATEGORIES — same 8 keys, same
+// order — because the CSV's column positions depend on that exact order.
+// ══════════════════════════════════════════════════════════
+const BD_REFERRAL_CATEGORIES=[
+  {key:'selfReferral', label:'Self-Referral'},
+  {key:'hospitalED', label:'Hospital ED'},
+  {key:'inpatientDetox', label:'Inpatient/Detox'},
+  {key:'pcpOutpatient', label:'PCP/Outpatient Clinic'},
+  {key:'courtCJC', label:'Court/CJC/Probation'},
+  {key:'mcoCareCoord', label:'MCO Care Coordination'},
+  {key:'peerCommunity', label:'Peer/Community'},
+  {key:'other', label:'Other'},
+];
+function parseBdReferralCsv(text){
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(!lines.length) throw new Error('That file looks empty.');
+  let start=0;
+  if(/^org\s*,/i.test(lines[0])) start=1;
+  const rows=[];
+  let skipped=0;
+  for(let i=start;i<lines.length;i++){
+    const cols=lines[i].split(',').map(c=>c.trim());
+    const org=cols[0], region=cols[1];
+    if(!org){ skipped++; continue; }
+    const counts={};
+    BD_REFERRAL_CATEGORIES.forEach((cat,ci)=>{ const raw=cols[2+ci]; counts[cat.key]=raw?(Number(raw)||0):0; });
+    const notes=cols[2+BD_REFERRAL_CATEGORIES.length]||'';
+    rows.push({ org, region:region||'', counts, notes });
+  }
+  return { rows, skipped };
 }
 
 function normalizeMonthLabel(text){
@@ -5727,6 +5877,172 @@ async delSRow(enc){
     const n = newEntries.length;
     const liveNote = isNewerOrSame ? '' : ` (kept ${existingLive.period} as the live view — this file's newest month is older)`;
     const t=document.createElement('div');t.textContent=`✓ Imported Klip billing for ${n} month${n!==1?'s':''} (${parsed.period||'period not detected'})${liveNote} — Director Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
+  },
+  // OPTUM SLA & DISENROLLMENT — moved from Linkage Hub 9/24/26, same relocation pattern as
+  // slotFilePL/slotFileKlip above. See parseOptumSlaWorkbook and its helpers above.
+  slotFileOptum(inp){
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); inp.value=''; return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        const sheets = await parseXlsxNamedSheets(e.target.result, [/.*/]);
+        const parsed = parseOptumSlaWorkbook(sheets, f.name);
+        M.prevOptum = parsed;
+        modH();
+      }catch(err){
+        M.prevOptum = {error: err.message};
+        modH();
+      }
+    };
+    r.readAsArrayBuffer(f);
+    inp.value='';
+  },
+  // Same serialized-write discipline as _plCommitChain/_klipCommitChain above (see the comment
+  // above _plCommitChain for the exact race this prevents).
+  _optumCommitChain: Promise.resolve(),
+  commitOptum(){
+    if(!M.prevOptum || M.prevOptum.error || !M.prevOptum.months.length) return;
+    const parsed = M.prevOptum;
+    M.prevOptum = null;
+    render();
+    H._optumCommitChain = H._optumCommitChain.then(()=>H._commitOptumNow(parsed)).catch(err=>{
+      console.warn('[commitOptum]', err);
+      showSaveError(`Save failed — the Optum SLA data for ${parsed.sourceFilename||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+    });
+    return H._optumCommitChain;
+  },
+  async _commitOptumNow(parsed){
+    let actuals = {};
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.linkage_optum_actuals');
+        if(rows && rows[0] && rows[0].value){
+          const remote = JSON.parse(rows[0].value);
+          if(remote && typeof remote==='object') actuals = remote;
+        }
+      }
+    }catch(err){ console.warn('[commitOptum] could not read existing linkage_optum_actuals', err); }
+
+    const importedAt = new Date().toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'numeric'});
+    parsed.months.forEach(mo=>{
+      const b = parsed.byMonth[mo];
+      if(!actuals[mo]) actuals[mo] = {};
+      const rec = actuals[mo];
+      if(b.followupTotal>0) rec.sla_discharge_followup_pct = Math.round((b.followupYes/b.followupTotal)*10000)/10000;
+      if(b.disenrolled.length>0){
+        rec.disenrolled_count = b.disenrolled.length;
+        const triggers = [...new Set(b.disenrolled.map(d=>String(d.trigger||'').trim()).filter(Boolean))];
+        rec.disenrollment_notes = triggers.length ? triggers.join('; ') : rec.disenrollment_notes;
+      }
+      rec.sla_data_source = `Imported from ${parsed.sourceFilename}, ${importedAt} (${b.followupTotal||0} discharge rows, ${b.disenrolled.length} disenrollments)`;
+    });
+
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        saved = await db.upsert('appdata', {key:'linkage_optum_actuals', value: JSON.stringify(actuals)}, 'key');
+      }
+    }catch(err){ saved = false; console.warn('[commitOptum] upsert failed', err); }
+
+    if(!saved){
+      showSaveError(`Save failed — the Optum SLA data for ${parsed.sourceFilename||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+      return;
+    }
+
+    recordImport('optum_sla', {
+      source_filename: parsed.sourceFilename || S._lastFile || null,
+      row_count: parsed.dataRowCount,
+      period_label: parsed.months.join(', '),
+      data_through: parsed.months[parsed.months.length-1],
+    });
+
+    render();
+    const t=document.createElement('div');t.textContent=`✓ Imported Optum SLA data for ${parsed.months.length} month${parsed.months.length!==1?'s':''} (${parsed.months.join(', ')}) — Linkage Hub picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
+  },
+  // BD REFERRAL VOLUME CSV — moved from BD Dashboard 9/24/26, same relocation pattern. Merges by
+  // org name (case-insensitive), exactly matching BD Dashboard's own bdImportReferralCsv() merge
+  // behavior, so a file already imported once in BD Dashboard before this move can be re-dropped
+  // here safely (existing counts add, they don't duplicate).
+  slotFileBdRef(inp){
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.csv$/i.test(f.name)){ alert('Please upload the .csv export directly.'); inp.value=''; return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        const parsed = parseBdReferralCsv(String(e.target.result||''));
+        parsed.sourceFilename = f.name;
+        M.prevBdRef = parsed;
+        modH();
+      }catch(err){
+        M.prevBdRef = {error: err.message};
+        modH();
+      }
+    };
+    r.readAsText(f);
+    inp.value='';
+  },
+  _bdRefCommitChain: Promise.resolve(),
+  commitBdRef(){
+    if(!M.prevBdRef || M.prevBdRef.error || !M.prevBdRef.rows.length) return;
+    const parsed = M.prevBdRef;
+    M.prevBdRef = null;
+    render();
+    H._bdRefCommitChain = H._bdRefCommitChain.then(()=>H._commitBdRefNow(parsed)).catch(err=>{
+      console.warn('[commitBdRef]', err);
+      showSaveError(`Save failed — the BD referral data for ${parsed.sourceFilename||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+    });
+    return H._bdRefCommitChain;
+  },
+  async _commitBdRefNow(parsed){
+    let referrals = [];
+    try{
+      if(typeof db!=='undefined'){
+        const rows = await db.get('appdata','key=eq.bd_referrals');
+        if(rows && rows[0] && rows[0].value){
+          const remote = JSON.parse(rows[0].value);
+          if(Array.isArray(remote)) referrals = remote;
+        }
+      }
+    }catch(err){ console.warn('[commitBdRef] could not read existing bd_referrals', err); }
+
+    let added=0, updated=0;
+    parsed.rows.forEach(row=>{
+      const existing = referrals.find(r=>(r.org||'').trim().toLowerCase()===row.org.toLowerCase());
+      if(existing){
+        BD_REFERRAL_CATEGORIES.forEach(cat=>{ existing.counts[cat.key]=Number(existing.counts[cat.key]||0)+Number(row.counts[cat.key]||0); });
+        if(row.notes) existing.notes = existing.notes ? existing.notes+' | '+row.notes : row.notes;
+        if(row.region && !existing.region) existing.region = row.region;
+        updated++;
+      } else {
+        referrals.push({ id:'ref_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7), org:row.org, region:row.region, counts:row.counts, notes:row.notes });
+        added++;
+      }
+    });
+
+    let saved = true;
+    try{
+      if(typeof db!=='undefined'){
+        saved = await db.upsert('appdata', {key:'bd_referrals', value: JSON.stringify(referrals)}, 'key');
+      }
+    }catch(err){ saved = false; console.warn('[commitBdRef] upsert failed', err); }
+
+    if(!saved){
+      showSaveError(`Save failed — the BD referral data for ${parsed.sourceFilename||'this file'} was not saved. Try again, and check your connection if it keeps failing.`);
+      return;
+    }
+
+    recordImport('bd_referrals', {
+      source_filename: parsed.sourceFilename || S._lastFile || null,
+      row_count: added+updated,
+      period_label: null,
+      data_through: null,
+    });
+
+    render();
+    const t=document.createElement('div');t.textContent=`✓ Imported ${added} new source${added!==1?'s':''} and updated ${updated} existing source${updated!==1?'s':''} — BD Dashboard picks it up on its next load`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
   },
   slotFileLinkage(inp){
     const f=inp.files[0]; if(!f) return;
