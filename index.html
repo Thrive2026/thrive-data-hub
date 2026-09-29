@@ -1839,7 +1839,10 @@ function parseClinicalNotesExport(rows){
       weeklyTotals:a.weekly.map(v=>Math.round(v*100)/100),
     });
   });
-  return { matched, unmatched };
+  // FIX (data-through bug, 9/29/26): expose the real last Service Date this function already
+  // computed (maxDate, used above to pick the target month) so commitClinGoals's recordImport()
+  // can record a genuine data_through instead of leaving it blank — see commitClinGoals below.
+  return { matched, unmatched, dataThrough: maxDate ? maxDate.toISOString().split('T')[0] : null };
 }
 const LK_UCODE_LABELS = {
   1:'Successful facility-based initiation', 2:'Unsuccessful facility-based initiation',
@@ -3220,12 +3223,18 @@ function parseCourtsJailNotesExport(rows){
   const periodLabel = new Date(Date.UTC(targetY,targetM,1)).toLocaleDateString('en-US',{month:'long',year:'numeric',timeZone:'UTC'});
 
   const acc={}; const unmatchedNames=new Set(); let rowCount=0;
+  // FIX (data-through bug, 9/29/26): track the real last Service Date among this month's actual
+  // Courts/Jail rows, same as computeLinkageMonthFromRows' maxDateInMonth — periodKey above is
+  // always the 1st of the month (a bucket key), not a real date, and was being used directly as
+  // data_through in commitNotes(), below.
+  let maxDateInMonth=null;
   for(let i=1;i<rows.length;i++){
     const row=rows[i]; if(!row) continue;
     const d = toDate(row[colDate]);
     if(!d || d.getUTCFullYear()!==targetY || d.getUTCMonth()!==targetM) continue;
     if(!isCourtsJailDivision(row)) continue;
     rowCount++;
+    if(!maxDateInMonth || d>maxDateInMonth) maxDateInMonth = d;
     const rawName=String(row[colBy]||'').trim(); if(!rawName) continue;
     const key = rawName.toLowerCase().replace(/\s+/g,' ');
     const staff = staffByName[key];
@@ -3239,7 +3248,8 @@ function parseCourtsJailNotesExport(rows){
   }
   const matched = Object.entries(acc).map(([id,a])=>({ id:+id, val:a.clients.size, revVal:a.billable, name:a.name }));
   const unmatched = Array.from(unmatchedNames).map(n=>n+' (not on roster)');
-  return {matched, unmatched, periodKey, periodLabel, _rowCount: rowCount};
+  const _dataThroughISO = maxDateInMonth ? maxDateInMonth.toISOString().split('T')[0] : null;
+  return {matched, unmatched, periodKey, periodLabel, _rowCount: rowCount, _dataThroughISO};
   } // end computeMonth
 
   const months = {};
@@ -4481,6 +4491,13 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
   const daysInMonth = new Date(Date.UTC(targetY,targetM+1,0)).getUTCDate();
   const isPartial = maxDateInMonth ? maxDateInMonth.getUTCDate() < daysInMonth : false;
   const partialThrough = maxDateInMonth ? maxDateInMonth.toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'UTC'}) : null;
+  // FIX (data-through bug, 9/29/26): real ISO date of the last Service Date actually in this
+  // month's data, distinct from periodKey (always the 1st of the month — a bucket key, not a
+  // real date). commitNotes()'s recordImport() calls were wrongly using periodKey for
+  // data_through, which made the Data Catalog's "Pimsy Notes Export" row always show the 1st of
+  // whatever month was latest (e.g. "Sep 1, 2026" for a file that actually had data through
+  // Sep 28) no matter how recent the real data was. See commitNotes() below.
+  const partialThroughISO = maxDateInMonth ? maxDateInMonth.toISOString().split('T')[0] : null;
   const linkageRows = inMonth.filter(lkIsLinkageRow);
 
   const clients = new Set(); const uCounts = {}; let revenue = 0, outreachAttempts = 0, g9009Total = 0;
@@ -4570,12 +4587,24 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
       if(uk==='U7') siteMap[site].u7++;
       if(uk==='U9') siteMap[site].u9++;
 
-      payerMap[ins] = payerMap[ins] || {approached:0, initiated:0, u7:0, u9:0, revenue:0};
-      payerMap[ins].revenue += rowRev;
-      if(['U1','U2','U3','U4'].includes(uk)) payerMap[ins].approached++;
-      if(uk==='U1'||uk==='U3') payerMap[ins].initiated++;
-      if(uk==='U7') payerMap[ins].u7++;
-      if(uk==='U9') payerMap[ins].u9++;
+      // FIX (payer-breakdown bug, 9/29/26): group by normalized payer CATEGORY (lkPayerCategory,
+      // already used elsewhere in this function for outreach-by-payer) instead of the raw literal
+      // Insurance Co. text. Pimsy has more than one literal string that means "Buckeye" (real
+      // export confirmed both "Buckeye Health Plan Medicaid" and "BUCKEYE Community Linkage (NOT
+      // INS)" — both correctly pass lkIsBKRow()'s /buckeye/i test for U-code billing purposes, but
+      // keying payerMap by the raw string split them into two separate rows on the "PAYER
+      // BREAKDOWN | Buckeye vs CareSource" table instead of one combined "Buckeye" row — exactly
+      // the confusing result Brandon flagged from the live page ("really we are just working with
+      // buckeye"). Outcomes Dashboard's own original (pre-live-bridge) parser, parseLinkageFromNotes(),
+      // already normalized this the same way via its own linkagePayer() — this brings Data Hub's
+      // live computation back in line with what that page always showed before.
+      const payerCat = lkPayerCategory(ins);
+      payerMap[payerCat] = payerMap[payerCat] || {approached:0, initiated:0, u7:0, u9:0, revenue:0};
+      payerMap[payerCat].revenue += rowRev;
+      if(['U1','U2','U3','U4'].includes(uk)) payerMap[payerCat].approached++;
+      if(uk==='U1'||uk==='U3') payerMap[payerCat].initiated++;
+      if(uk==='U7') payerMap[payerCat].u7++;
+      if(uk==='U9') payerMap[payerCat].u9++;
 
       // Per-provider numbers — feeds Linkage Hub's Provider Scorecard (bk_mo/u1_total..u9_total/
       // invoiced_mo) so that table refreshes from real data each upload instead of staying
@@ -4716,7 +4745,7 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     },
     communityTransition: [],
     weekly, period: periodLabel, periodKey, _rowCount: linkageRows.length,
-    _partial: isPartial, _dataThrough: partialThrough,
+    _partial: isPartial, _dataThrough: partialThrough, _dataThroughISO: partialThroughISO,
     _unavailable: ['Community Transition / LOS table', 'All Other Medicaid conversion rate (no distinct Conversion note type in this export)'],
   };
 }
@@ -4881,6 +4910,10 @@ async function parseLinkageHistoryBackfill(buf){
     const daysInMonth = new Date(Date.UTC(yy,mm,0)).getUTCDate(); // mm is already 1-indexed from the ISO string's month field
     mo._partial = mo._maxDayInMonth < daysInMonth;
     mo._dataThrough = new Date(Date.UTC(yy,mm-1,mo._maxDayInMonth)).toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'UTC'});
+    // FIX (data-through bug, 9/29/26): real ISO date alongside the short display string above —
+    // see commitNotes()'s backfill branch, which was using periodKey (always the 1st of the
+    // month) for data_through instead of a real date.
+    mo._dataThroughISO = new Date(Date.UTC(yy,mm-1,mo._maxDayInMonth)).toISOString().split('T')[0];
     delete mo._maxDayInMonth;
   });
   return months; // {periodKey: monthSnapshot, ...}
@@ -6209,7 +6242,14 @@ async delSRow(enc){
       p.backfillNew.forEach(key=>{ S.linkageHistory[key] = {...p.backfill[key], importedAt:new Date().toISOString()}; });
       sv('linkageHistory', S.linkageHistory);
       const n = p.backfillNew.length;
-      recordImport('pimsy_notes', {row_count:n, period_label:p.backfillNew.slice().sort().pop()||null, data_through:p.backfillNew.slice().sort().pop()||null});
+      // FIX (data-through bug, 9/29/26): period_label stays the month-bucket key (a legitimate
+      // "which month" label), but data_through now uses each backfilled month's own real last
+      // date (_dataThroughISO) instead of that same bucket key, which always reads as the 1st of
+      // the month and was making the Data Catalog understate freshness. Falls back to the bucket
+      // key only if a month somehow has no real date (shouldn't happen — belt and suspenders).
+      const _bfLatestPeriod = p.backfillNew.slice().sort().pop()||null;
+      const _bfDataThrough = p.backfillNew.reduce((max,k)=>{ const iso=p.backfill[k]&&p.backfill[k]._dataThroughISO; return (iso && (!max||iso>max)) ? iso : max; }, null);
+      recordImport('pimsy_notes', {row_count:n, period_label:_bfLatestPeriod, data_through:_bfDataThrough||_bfLatestPeriod});
       M.prevNotes = null;
       render();
       const t=document.createElement('div');t.textContent=`✓ Backfilled ${n} historical month${n!==1?'s':''}${p.backfillSkip.length?` (skipped ${p.backfillSkip.length} already on file)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
@@ -6279,7 +6319,21 @@ async delSRow(enc){
       if(latestPeriod){ S.period = latestPeriod; sv('pp', latestPeriod); }
       sv('p', S.pd);
     }
-    recordImport('pimsy_notes', {row_count:(lkMonthCount-lkSkipped)+courtsN, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null, data_through:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+    // FIX (data-through bug, 9/29/26): period_label keeps the month-bucket key (Object.keys(...)
+    // .sort().pop(), always the 1st of the latest month — a fine "which month" label), but
+    // data_through now uses the real latest Service Date across this upload's linkage AND courts
+    // months (each month's _dataThroughISO, added above/in parseCourtsJailNotesExport) instead of
+    // that same bucket key. This is exactly the bug behind the Data Catalog's "Pimsy Notes
+    // Export" row always showing the 1st of the month (e.g. "Sep 1, 2026" for a file that
+    // actually had real data through Sep 28) no matter how recent the upload really was — see
+    // ecosystem-next-steps-tracker.md, "Closed, 9/29/26 — BH Linkage live bridge" and the
+    // separately-flagged data_through anomaly.
+    const _notesPeriodLabel = Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null;
+    const _notesDataThrough = [
+      ...Object.values(lkMonths).map(mo=>mo._dataThroughISO),
+      ...Object.values(ctMonths).map(mo=>mo._dataThroughISO),
+    ].filter(Boolean).sort().pop() || _notesPeriodLabel;
+    recordImport('pimsy_notes', {row_count:(lkMonthCount-lkSkipped)+courtsN, period_label:_notesPeriodLabel, data_through:_notesDataThrough});
     // Outcomes Dashboard ledger bridge — same raw file, no separate upload needed there for
     // Sessions/Revenue/Minutes. Fire-and-forget relative to the Linkage/Courts commit above
     // (which is already done and rendered by this point) so a slow/failed Supabase round trip
@@ -6290,7 +6344,11 @@ async delSRow(enc){
       const objRows = olRowsToObjects(p.rawRows);
       olMergeNotesIntoProgramLedger(objRows).then(res=>{
         if(res.ok){
-          recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null, data_through:Object.keys(lkMonths).sort().pop()||Object.keys(ctMonths).sort().pop()||null});
+          // Same data-through fix as the 'pimsy_notes' recordImport() above — reuses the same
+          // real latest-Service-Date computation (_notesPeriodLabel/_notesDataThrough) rather
+          // than the month-bucket key, since this is the same upload's data going to a second
+          // catalog row.
+          recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:_notesPeriodLabel, data_through:_notesDataThrough});
         }else{
           showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger failed to save — its Sessions/Revenue trends will still show old data until this succeeds. Try re-uploading this file.');
         }
@@ -6344,9 +6402,15 @@ async delSRow(enc){
       showSaveError('Linkage/Courts imported fine, but updating Clinical Goals failed to save. Try re-uploading this file.');
       return;
     }
+    // FIX (data-through gap, 9/29/26): parseClinicalNotesExport now returns a real dataThrough
+    // date (the same maxDate it already used internally to pick the target month) — previously
+    // this recordImport() call passed neither period_label nor data_through at all, which is why
+    // the Data Catalog's "Weekly Clinical Goals" row always showed "—" for Data Through.
     recordImport('director_clinweekly', {
       source_filename: S._lastFile || null,
       row_count: parsed.matched.length,
+      period_label: parsed.dataThrough || null,
+      data_through: parsed.dataThrough || null,
     });
     const n = parsed.matched.length, u = parsed.unmatched.length;
     const t=document.createElement('div');t.textContent=`✓ Clinical Goals updated — ${n} clinician${n!==1?'s':''} matched${u?`, ⚠️ ${u} unmatched name${u!==1?'s':''} (${parsed.unmatched.slice(0,3).join(', ')}${u>3?'…':''})`:''}`;t.style.cssText=`position:fixed;top:${u?68:20}px;right:20px;background:${u?'#a07e0a':'#1B5E20'};color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2);max-width:360px`;document.body.appendChild(t);setTimeout(()=>t.remove(),4200);
@@ -6380,10 +6444,20 @@ async delSRow(enc){
       return;
     }
     const monthKeys = Object.keys(parsedMonths);
+    // FIX (data-through gap + off-by-one, 9/29/26): two issues here. (1) parseLinkageUcodeNotes
+    // already computes a real per-month `dataThrough` (YYYY-MM-DD, the actual last Service Date
+    // in that month) but it was never read — this recordImport() call never passed data_through
+    // at all, which is why the Data Catalog's "Linkage U-Code Outcomes" row always showed "—".
+    // (2) the old `monthKeys.sort().pop()` mutated monthKeys in place (pop() removes the max key
+    // it just found), so the `const n = monthKeys.length` two lines below was silently one short
+    // of the real month count used in row_count above it — sorting a copy instead fixes both.
+    const _ucodeSortedKeys = monthKeys.slice().sort();
+    const _ucodeLatestKey = _ucodeSortedKeys[_ucodeSortedKeys.length-1] || null;
     recordImport('director_linkage_ucodes', {
       source_filename: S._lastFile || null,
       row_count: monthKeys.length,
-      period_label: monthKeys.sort().pop() || null,
+      period_label: _ucodeLatestKey,
+      data_through: _ucodeLatestKey ? ((parsedMonths[_ucodeLatestKey]||{}).dataThrough || null) : null,
     });
     const n = monthKeys.length;
     const t=document.createElement('div');t.textContent=`✓ Linkage U-code outcomes updated — ${n} month${n!==1?'s':''}`;t.style.cssText='position:fixed;top:116px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3200);
