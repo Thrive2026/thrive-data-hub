@@ -4440,6 +4440,15 @@ function linkageSiteForRow(name, date){
 // and computeLinkageMonthFromRows (recompute from a merged raw pool), so both paths agree on
 // exactly the same definition of what counts.
 function lkIsBKRow(row){ return /buckeye/i.test(String(row.ins||'')); }
+// ADDED 9/28/26, per Brandon's centralization work: same payer bucketing Outcomes Dashboard's
+// own (now-superseded) local linkage parser used, ported here so live outreach-by-payer numbers
+// match what that page used to compute from its own separate upload.
+function lkPayerCategory(insCo){
+  const s=String(insCo||'').toLowerCase();
+  if(s.includes('buckeye')) return 'Buckeye';
+  if(s.includes('caresource')) return 'CareSource';
+  return 'Other';
+}
 // Division text is unreliable in Pimsy — staff sometimes leave a Buckeye U-code note under
 // "MH/SUD Community Services" instead of "...Linkage" (confirmed against a real export: 13
 // Buckeye-billed, real U-code notes — U1 through U9, including one client's entire U5→U7→U9
@@ -4486,6 +4495,21 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
   // than faked — see nonBk.conversion_rate note below.
   const nonBkClients = new Set(), nonBkCaresourceClients = new Set();
   let nonBkOutreach = 0, nonBkUCodeFlagged = 0;
+  // ADDED 9/28/26: outreach-by-payer + unique-outreach-member tracking, and a Buckeye-scoped
+  // "G9009 only, no real pipeline progression" flag -- both previously only computed by Outcomes
+  // Dashboard's own separate (now-superseded) upload of the same Notes export. G9009-only is
+  // scoped to Buckeye clients specifically: U-code billing (the "real pipeline progression" this
+  // flags the absence of) is Buckeye-only by the confirmed Model 2.0 rule, so a non-Buckeye
+  // client was never eligible for U-code progression in the first place -- counting them here
+  // would just flag every non-Buckeye G9009 recipient, which isn't a meaningful contract-risk
+  // signal. Outreach-by-payer/unique-members stay unscoped (any payer), matching how outreach
+  // attempts were always counted (see outreachAttempts++ below, never payer-gated).
+  const outreachByPayerCounts = {}, outreachMembersSet = new Set(), bkClientCodes = {};
+  function markBkClientCode(clientId, code){
+    if(clientId==null || clientId==='') return;
+    bkClientCodes[clientId] = bkClientCodes[clientId] || new Set();
+    bkClientCodes[clientId].add(code);
+  }
 
   linkageRows.forEach(row=>{
     const code = String(row.code||'');
@@ -4507,9 +4531,18 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     if(!lkIsBKRow(row) && /OTR-\s*Linkage/i.test(code)) nonBkOutreach++;
     if(!lkIsBKRow(row) && code.toUpperCase().match(/U(\d)\b/)) nonBkUCodeFlagged++; // per Model 2.0, non-Buckeye should have zero U-code billing at all
 
+    if(/OTR-\s*Linkage/i.test(code)){
+      const payerCat = lkPayerCategory(ins);
+      outreachByPayerCounts[payerCat] = (outreachByPayerCounts[payerCat]||0)+1;
+      if(clientId!=null && clientId!=='') outreachMembersSet.add(clientId);
+    }
+
     if(/g9009/i.test(code)){
       g9009Total++;
-      if(lkIsBKRow(row)) revenue += LINKAGE_UCODE_RATES.G9009; // priced now — wasn't before
+      if(lkIsBKRow(row)){
+        revenue += LINKAGE_UCODE_RATES.G9009; // priced now — wasn't before
+        markBkClientCode(clientId, 'G9009');
+      }
       // Category comes from whatever's left after stripping the "(G9009)"/"G9009"/"SSR
       // Completed" boilerplate — prefer a trailing parenthetical ("(MH Resource)") when
       // present, since that's the more specific label on the "--Other" style codes.
@@ -4525,6 +4558,7 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     if(um && lkIsBKRow(row)){
       const uk = 'U'+um[1];
       uCounts[uk] = (uCounts[uk]||0)+1;
+      markBkClientCode(clientId, uk);
       if(uk==='U5' && clientId!=null && clientId!=='' && d && (!bkClientFirstU5[clientId] || d<bkClientFirstU5[clientId])) bkClientFirstU5[clientId]=d;
       const rowRev = LINKAGE_UCODE_RATES[uk] || 0;
       revenue += rowRev;
@@ -4583,6 +4617,12 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     return Math.round((u5date-first)/86400000);
   }).filter(v=>v!=null && v>=0);
   const avgDaysToU5 = daysToU5List.length ? daysToU5List.reduce((s,v)=>s+v,0)/daysToU5List.length : null;
+
+  const REAL_UCODES = ['U1','U2','U3','U4','U5','U6','U7','U8','U9'];
+  let g9009OnlyCount = 0;
+  Object.values(bkClientCodes).forEach(codes=>{
+    if(codes.has('G9009') && !REAL_UCODES.some(c=>codes.has(c))) g9009OnlyCount++;
+  });
 
   const kpi = {
     clientsServed: clients.size, initiated, u1, u3, u5, u7, u9,
@@ -4666,7 +4706,14 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
   }
   return {
     kpi, pipeline, sites, payers, providers, g9009, nonBk,
-    outreach: { totalAttempts: outreachAttempts, buckeyeAttempts:null, caresourceAttempts:null, uniqueMembers:null, g9009OnlyNoProgression:null },
+    outreach: {
+      totalAttempts: outreachAttempts,
+      buckeyeAttempts: outreachByPayerCounts['Buckeye']||0,
+      caresourceAttempts: outreachByPayerCounts['CareSource']||0,
+      otherAttempts: outreachByPayerCounts['Other']||0, // new 9/28/26 -- wasn't part of the original null-filled shape
+      uniqueMembers: outreachMembersSet.size,
+      g9009OnlyNoProgression: g9009OnlyCount,
+    },
     communityTransition: [],
     weekly, period: periodLabel, periodKey, _rowCount: linkageRows.length,
     _partial: isPartial, _dataThrough: partialThrough,
