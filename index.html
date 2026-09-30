@@ -2796,7 +2796,7 @@ function modH(){
         <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Hospital Outcomes</div>
         <div style="font-size:12px;color:#3e4a78;line-height:1.7">
           <div>✅ <strong>${M.prevHosp.activePRS}</strong> providers · <strong>${M.prevHosp.totalEncounters}</strong> encounters · period ${xe(M.prevHosp.period)}</div>
-          <div>Engaged: ${M.prevHosp.totalEngaged} · Linked: ${M.prevHosp.totalLinked} · Did not engage: ${M.prevHosp.totalDidNot}</div>
+          <div>Engaged: ${M.prevHosp.totalEngaged} · Arrived at destination: ${M.prevHosp.totalArrived}${M.prevHosp.totalLinkedThriveCPS!=null?' · Linked to Thrive Peer Support: '+M.prevHosp.totalLinkedThriveCPS:''} · Did not engage: ${M.prevHosp.totalDidNot}</div>
           ${M.prevHosp.excludedNotOnRoster?`<div style="color:#8089a8;font-size:11px">⚠️ ${M.prevHosp.excludedNotOnRoster} row(s) skipped — not on Hospital roster: ${M.prevHosp.excludedNames.slice(0,10).map(xe).join(', ')}${M.prevHosp.excludedNames.length>10?'…':''}</div>`:''}
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevHosp=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitHosp()">Confirm Import</button></div>
@@ -3592,6 +3592,13 @@ function hospExcelDate(v){
   if(typeof v==='string'){const d=new Date(v);return isNaN(d)?null:d;}
   return null;
 }
+function hospYN(v){
+  if(v==null) return null;
+  const s=String(v).trim().toUpperCase();
+  if(s==='YES'||s==='Y') return true;
+  if(s==='NO'||s==='N') return false;
+  return null;
+}
 function aggregateHospitalOutcomes(rows, filename){
   const hdr = rows[0].map(h=>String(h||'').toLowerCase().trim());
   const col=(...patterns)=>{
@@ -3619,71 +3626,256 @@ function aggregateHospitalOutcomes(rows, filename){
   // treat them as engaged rather than scoring them as declines.
   const BH_ONLY_RE = /behavioral health only/i;
 
+  // FIX (Hospital Outcomes live bridge, 9/29/26): the raw JotForm export (Jul 2026+) carries far
+  // more per-encounter detail than the columns above use — Outcomes Dashboard's own separate
+  // upload (parseHospitalRawForm) already extracts all of it for its Site Performance table, PRS
+  // Performance table, engagement funnel, disclosure-indicator table, and "self-disclosure
+  // predicts arrival" featured finding. These columns bring that same picture here (same real
+  // JotForm questions, confirmed against Outcomes Dashboard's own column map), so this one upload
+  // can feed Outcomes Dashboard live instead of needing its own separate, redundant JotForm
+  // upload there — see computeHospitalDerivedViews()/applyLiveHospitalMetrics() on that page.
+  const colReferred = col(/did you provide the peer with resources/);
+  const colReferredList = col(/if referred, please check all that apply/);
+  const colCaresourceLC = col(/if peer was a caresource member/);
+  const colSocialRef = col(/was the peer referred for other social services/);
+  const colTransport = col(/was the client transported/);
+  const colF2f = col(/face to face.*minutes|total amount of time.*face to face/);
+  const colDisclosed = col(/did the peer disclose prior treatment/);
+  const colMat = col(/did the peer receive mat while in the hospital/);
+  const colFamily = col(/were any family members or friends present/);
+  const colEduStaff = col(/did you educate any hospital staff/);
+  const hasRichColumns = useNewSchema && colReferred>=0 && colDisclosed>=0;
+
   let minDate=null,maxDate=null;
   const DATE_FLOOR = new Date(2024,0,1), DATE_CEIL = new Date(2026,11,31);
   const TESTERS = new Set(['mackenzie phillips','test']);
   const TESTER_RE = /^(test|tester|demo)/i;
 
   const byPRS={}, siteMap={}, txMap={};
-  let totalEncounters=0,totalEngaged=0,totalLinked=0,totalDidNot=0,totalRows=0;
+  let totalEncounters=0,totalEngaged=0,totalArrived=0,totalDidNot=0,totalRows=0;
   let excludedNotOnRoster=0; const excludedNames=new Set();
   const rbn = hospRosterByNorm();
+
+  // Rich, roster-UNfiltered accumulators — every row counts here, no roster exclusion. This
+  // deliberately mirrors Outcomes Dashboard's own parseHospitalRawForm() exactly (same per-site/
+  // per-staff keys, same status derivation, same featured-finding math) so these numbers match
+  // what's live on that page today. Kept separate from byPRS above, which stays roster-scoped —
+  // that's Data Hub's own excluded-name-detection feature and isn't something Outcomes Dashboard
+  // has ever done.
+  const siteStats={}, staffStats={};
+  let interested=0, referred=0, transported=0, caresourceLinked=0;
+  let disclosed=0, mat=0, familyPresent=0, staffEducated=0, socialReferred=0, linkedThriveCPS=0;
+  let discArrived=0, discNotArrived=0, noDiscArrived=0, noDiscNotArrived=0;
+  let discF2fSum=0, discF2fN=0, noDiscF2fSum=0, noDiscF2fN=0;
+  const statusCount={};
 
   for(let i=1;i<rows.length;i++){
     const r=rows[i]; if(!r||r.every(c=>c===''||c==null)) continue;
     const prsRaw=String(r[colPRS]||'').trim(); if(!prsRaw||TESTER_RE.test(prsRaw)) continue;
     const prsKey=norm(prsRaw);
     if(TESTERS.has(prsKey)) continue;
-    // Free-text PRS name entry on the simplified form means nicknames/typos ("Jackie Kovach",
-    // "Derek Ch") won't match the roster exactly — fall back to fuzzy match before excluding.
-    const roster = rbn[prsKey] || findStaffFuzzy(prsKey, rbn) || null;
-    if(!roster){ excludedNotOnRoster++; excludedNames.add(prsRaw); continue; }
     const sdate=colDate>=0?hospExcelDate(r[colDate]):null;
     const hosp=String(r[colHosp]||'').trim();
+    const site = hosp.split(' - ')[0].trim() || 'Unknown Site';
     const outcome=String(r[colOutcome]||'').trim();
     const tx=colTx>=0?String(r[colTx]||'').trim():'';
     if(sdate && sdate>=DATE_FLOOR && sdate<=DATE_CEIL){
       if(!minDate||sdate<minDate)minDate=sdate;
       if(!maxDate||sdate>maxDate)maxDate=sdate;
     }
-    const displayName = roster.fn+' '+roster.ln;
-    // Key by the resolved staff id (not the raw typed name) so two spellings of the same
-    // person on the source form ("Ross Scott" one row, "Ross S." another — both fuzzy-match
-    // the same roster entry) collapse into a single PRS Performance row instead of two.
-    const rosterKey = roster.id!=null ? 'id:'+roster.id : prsKey;
-    if(!byPRS[rosterKey]){byPRS[rosterKey]={name:displayName,tp:roster?.tp||'',region:roster?.region||'',note:roster?.note||'',encounters:0,engaged:0,linked:0,didNot:0,siteSet:new Set()};}
-    const p=byPRS[rosterKey];
-    p.encounters++;totalEncounters++;totalRows++;
-    let engaged, linked, didNot;
+
+    // Two DELIBERATELY SEPARATE "linked" concepts (Brandon's direction, 9/29/26 — do not
+    // collapse these back into one ambiguous "linked" number): `arrivedFlag` = arrived at
+    // WHATEVER destination they were referred to (Data Hub's original, simpler definition).
+    // `linkedThriveCPS` below (raw-JotForm rows only) = referred AND the referral was
+    // specifically to Thrive's own Community Peer Support (Outcomes Dashboard's stricter
+    // "Linked at Bedside" definition). The legacy tracker-workbook format only ever captured
+    // one combined concept via its Status column, so for those rows `arrivedFlag` and the
+    // legacy "linked with PRS" concept are the same value — the old format can't tell them
+    // apart, which is a real, honest limitation of that export, not a bug here.
+    let engaged, arrivedFlag, didNot;
     if(useNewSchema){
-      const interest = colInterest>=0 ? String(r[colInterest]||'').trim().toUpperCase() : '';
+      const interestVal = colInterest>=0 ? String(r[colInterest]||'').trim().toUpperCase() : '';
       const cpsOnly = colCPSOnly>=0 && /^y/i.test(String(r[colCPSOnly]||'').trim());
-      const arrived = colArrived>=0 ? String(r[colArrived]||'').trim().toUpperCase() : '';
+      const arrivedVal = colArrived>=0 ? String(r[colArrived]||'').trim().toUpperCase() : '';
       const isBHOnly = BH_ONLY_RE.test(hosp);
-      engaged = isBHOnly || interest==='YES' || cpsOnly;
-      linked  = arrived==='YES';
+      engaged = isBHOnly || interestVal==='YES' || cpsOnly;
+      arrivedFlag  = arrivedVal==='YES';
       didNot  = !engaged;
     } else {
       engaged = outcome && !/peer did not engage/i.test(outcome);
-      linked  = /linked with prs|in treatment|transferred|presumptive/i.test(outcome);
+      arrivedFlag  = /linked with prs|in treatment|transferred|presumptive/i.test(outcome);
       didNot  = /peer did not engage/i.test(outcome);
     }
-    if(engaged){p.engaged++;totalEngaged++;}
-    if(linked){p.linked++;totalLinked++;}
-    if(didNot){p.didNot++;totalDidNot++;}
-    if(hosp){p.siteSet.add(hosp);if(!siteMap[hosp])siteMap[hosp]={name:hosp,encounters:0,engaged:0,linked:0};siteMap[hosp].encounters++;if(engaged)siteMap[hosp].engaged++;if(linked)siteMap[hosp].linked++;}
-    if(linked&&tx&&tx.toLowerCase()!=='none'){txMap[tx]=(txMap[tx]||0)+1;}
+    totalEncounters++; totalRows++;
+    if(engaged) totalEngaged++;
+    if(arrivedFlag) totalArrived++;
+    if(didNot) totalDidNot++;
+    if(hosp){
+      if(!siteMap[hosp])siteMap[hosp]={name:hosp,encounters:0,engaged:0,arrived:0};
+      siteMap[hosp].encounters++; if(engaged)siteMap[hosp].engaged++; if(arrivedFlag)siteMap[hosp].arrived++;
+    }
+    if(arrivedFlag&&tx&&tx.toLowerCase()!=='none'){txMap[tx]=(txMap[tx]||0)+1;}
+
+    // Roster-scoped view (Data Hub's own excluded-name detection, unchanged in spirit) —
+    // free-text PRS name entry means nicknames/typos won't match the roster exactly, so this
+    // falls back to fuzzy match before excluding.
+    const roster = rbn[prsKey] || findStaffFuzzy(prsKey, rbn) || null;
+    if(!roster){ excludedNotOnRoster++; excludedNames.add(prsRaw); }
+    else {
+      const displayName = roster.fn+' '+roster.ln;
+      const rosterKey = roster.id!=null ? 'id:'+roster.id : prsKey;
+      if(!byPRS[rosterKey]){byPRS[rosterKey]={name:displayName,tp:roster?.tp||'',region:roster?.region||'',note:roster?.note||'',encounters:0,engaged:0,arrived:0,didNot:0,siteSet:new Set()};}
+      const p=byPRS[rosterKey];
+      p.encounters++;
+      if(engaged)p.engaged++;
+      if(arrivedFlag)p.arrived++;
+      if(didNot)p.didNot++;
+      if(hosp)p.siteSet.add(hosp);
+    }
+
+    // Rich, unfiltered per-encounter detail — raw JotForm only. Ported directly from Outcomes
+    // Dashboard's parseHospitalRawForm() so the numbers match what's live there today.
+    if(hasRichColumns){
+      if(!siteStats[site]) siteStats[site] = {encounters:0,interested:0,transported:0,arrived:0,f2fSum:0,f2fN:0};
+      const ss = siteStats[site]; ss.encounters++;
+      if(!staffStats[prsRaw]) staffStats[prsRaw] = {encounters:0,interested:0,transported:0,arrived:0,disclosed:0,f2fSum:0,f2fN:0,siteCount:{}};
+      const st = staffStats[prsRaw]; st.encounters++;
+      if(hosp) st.siteCount[hosp] = (st.siteCount[hosp]||0)+1;
+
+      const interestYN = hospYN(r[colInterest]);
+      const referredYN = hospYN(r[colReferred]);
+      const arrivedRaw = colArrived>=0 ? String(r[colArrived]||'').trim().toUpperCase() : '';
+      const transportRaw = colTransport>=0 ? String(r[colTransport]||'').trim() : '';
+      const isTransported = /^Transported/i.test(transportRaw);
+      const disclosedYN = hospYN(r[colDisclosed]);
+      const f2fVal = colF2f>=0 ? Number(r[colF2f]) : NaN;
+      const hasF2f = colF2f>=0 && r[colF2f]!=null && !isNaN(f2fVal);
+
+      if(interestYN===true){ interested++; ss.interested++; st.interested++; }
+      if(referredYN===true) referred++;
+      if(isTransported){ transported++; ss.transported++; st.transported++; }
+      if(arrivedRaw==='YES'){ ss.arrived++; st.arrived++; }
+      if(hospYN(r[colCaresourceLC])===true) caresourceLinked++;
+      if(disclosedYN===true){ disclosed++; st.disclosed++; }
+      if(hospYN(r[colMat])===true) mat++;
+      if(hospYN(r[colFamily])===true) familyPresent++;
+      if(hospYN(r[colEduStaff])===true) staffEducated++;
+      if(hospYN(r[colSocialRef])===true) socialReferred++;
+      if(hasF2f){ ss.f2fSum+=f2fVal; ss.f2fN++; st.f2fSum+=f2fVal; st.f2fN++; }
+
+      if(disclosedYN===true){
+        if(hasF2f){ discF2fSum+=f2fVal; discF2fN++; }
+        if(arrivedRaw==='YES') discArrived++; else if(arrivedRaw) discNotArrived++;
+      } else if(disclosedYN===false){
+        if(hasF2f){ noDiscF2fSum+=f2fVal; noDiscF2fN++; }
+        if(arrivedRaw==='YES') noDiscArrived++; else if(arrivedRaw) noDiscNotArrived++;
+      }
+
+      const referredListTxt = colReferredList>=0 ? String(r[colReferredList]||'') : '';
+      const isThriveLinked = referredYN===true && (/community peer support/i.test(referredListTxt) || /thrive/i.test(tx));
+      let status;
+      if(interestYN===false) status='Peer Did Not Engage at Hospital';
+      else if(isThriveLinked) status='Linked with PRS';
+      else if(referredYN===true) status='Referred - External Provider';
+      else if(interestYN===true) status='Interested - No Referral Made';
+      else status='Unknown / Not Captured';
+      statusCount[status]=(statusCount[status]||0)+1;
+      if(status==='Linked with PRS') linkedThriveCPS++;
+    }
   }
   Object.values(byPRS).forEach(p=>{p.sites=p.siteSet.size;delete p.siteSet;});
   const periodLabel = minDate&&maxDate ? `${minDate.toLocaleDateString('en-US',{month:'short',day:'numeric'})}–${maxDate.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}` : filename;
-  return {
-    period:periodLabel, totalRows, totalEncounters, totalEngaged, totalLinked, totalDidNot,
+
+  const result = {
+    period:periodLabel, totalRows, totalEncounters, totalEngaged,
+    // Two distinct, deliberately separate "linked" numbers — see the comment above the main loop.
+    // totalArrived = arrived anywhere they were referred. totalLinkedThriveCPS = referred
+    // specifically to Thrive's own Community Peer Support (null when the source format can't
+    // tell the two apart — the legacy tracker workbook, not the raw JotForm export).
+    totalArrived, totalLinkedThriveCPS: hasRichColumns ? linkedThriveCPS : null,
+    totalDidNot,
     activePRS: Object.values(byPRS).filter(p=>p.encounters>0).length,
     byPRS, sites:Object.values(siteMap).sort((a,b)=>b.encounters-a.encounters),
     txCenters:Object.entries(txMap).sort((a,b)=>b[1]-a[1]),
     excludedNotOnRoster, excludedNames:Array.from(excludedNames),
     importedAt:new Date().toISOString()
   };
+
+  if(hasRichColumns){
+    result._raw = true;
+    result.statusCount = statusCount;
+    result.hospitalCount = {};
+    Object.entries(siteStats).forEach(([site,s])=>{ result.hospitalCount[site]=s.encounters; });
+    result.staffCount = {};
+    Object.entries(staffStats).forEach(([name,s])=>{ result.staffCount[name]=s.encounters; });
+
+    result.breakdown = Object.entries(siteStats)
+      .sort((a,b)=>b[1].encounters-a[1].encounters)
+      .map(([site,s])=>[
+        site, s.encounters,
+        s.encounters ? Math.round(s.interested/s.encounters*100)+'%' : '0%',
+        s.transported,
+        s.encounters ? Math.round(s.transported/s.encounters*100)+'%' : '0%',
+        s.arrived,
+        s.f2fN ? Math.round(s.f2fSum/s.f2fN)+' min' : '—'
+      ]);
+    result.breakdownNote = 'Site breakdown computed live from the raw JotForm encounter export. "Not transported" and blank referral fields are excluded from Transport %.';
+
+    result.prsPerformanceRows = Object.entries(staffStats)
+      .sort((a,b)=>b[1].encounters-a[1].encounters)
+      .map(([name,s])=>{
+        const primarySite = Object.entries(s.siteCount).sort((a,b)=>b[1]-a[1])[0];
+        const primaryPct = primarySite && s.encounters ? Math.round(primarySite[1]/s.encounters*100) : 0;
+        return [
+          name,
+          primarySite ? `${primarySite[0]} (${primaryPct}%)` : '—',
+          s.encounters,
+          s.encounters ? Math.round(s.interested/s.encounters*100)+'%' : '0%',
+          s.encounters ? Math.round(s.transported/s.encounters*100)+'%' : '0%',
+          s.encounters ? Math.round(s.arrived/s.encounters*100)+'%' : '0%',
+          s.f2fN ? Math.round(s.f2fSum/s.f2fN)+' min' : '—',
+          s.encounters ? Math.round(s.disclosed/s.encounters*100)+'%' : '0%',
+          ''
+        ];
+      });
+
+    result.funnelRows = [
+      ['Total encounters', totalEncounters, '100%', 'All clients seen by hospital PRS'],
+      ['Expressed interest', interested, totalEncounters?Math.round(interested/totalEncounters*100)+'%':'0%', 'Wanted connection to services, treatment, or community peer support — primary rapport signal'],
+      ['Received referral', referred, totalEncounters?Math.round(referred/totalEncounters*100)+'%':'0%', 'Given a referral or resource by the PRS'],
+      ['Transported to destination', transported, totalEncounters?Math.round(transported/totalEncounters*100)+'%':'0%', 'Physically transported to treatment, detox, shelter, or recovery housing'],
+      ['Confirmed arrived', totalArrived, transported?Math.round(totalArrived/transported*100)+'% of transported':'0%', 'Confirmed at their destination — ANY destination, not only Thrive\'s own Community Peer Support (see the "Linked at Bedside" KPI tile for that narrower, Thrive-specific count)'],
+      ['CareSource — linked to LC', caresourceLinked, totalEncounters?Math.round(caresourceLinked/totalEncounters*100)+'%':'0%', 'CareSource members connected to community linkage coordinator']
+    ];
+    result.disclosureRows = [
+      ['Disclosed prior treatment', disclosed, totalEncounters?Math.round(disclosed/totalEncounters*100)+'%':'0%', 'Strongest single self-disclosure marker — clients open up when rapport is established'],
+      ['Received MAT while in hospital', mat, totalEncounters?Math.round(mat/totalEncounters*100)+'%':'0%', 'Clinical engagement during stay — peer often plays advocacy role'],
+      ['Hospital staff educated', staffEducated, totalEncounters?Math.round(staffEducated/totalEncounters*100)+'%':'0%', 'PRS educated hospital staff on peer support — system-level rapport'],
+      ['Family or friends present', familyPresent, totalEncounters?Math.round(familyPresent/totalEncounters*100)+'%':'0%', 'Natural support engagement during encounter'],
+      ['Referred for social services', socialReferred, totalEncounters?Math.round(socialReferred/totalEncounters*100)+'%':'0%', 'Housing, food, clothing, or other social needs identified']
+    ];
+
+    let featured=null;
+    const discTotal=discArrived+discNotArrived, noDiscTotal=noDiscArrived+noDiscNotArrived;
+    if (discTotal>0 && noDiscTotal>0) {
+      const rateDisc = discArrived/discTotal, rateNoDisc = noDiscArrived/noDiscTotal;
+      const mult = rateNoDisc>0 ? (rateDisc/rateNoDisc) : null;
+      featured = {
+        icon:'💡', tag:`Featured Finding · From ${totalEncounters.toLocaleString()}-encounter data audit`,
+        title:'Self-Disclosure Predicts Treatment Arrival',
+        primaryStat: mult!=null ? mult.toFixed(2)+'×' : 'N/A',
+        primaryLabel:'higher arrival rate when clients disclose prior treatment to their peer',
+        detail:`Of ${discTotal.toLocaleString()} clients who disclosed prior treatment, <strong>${Math.round(rateDisc*100)}% arrived</strong> at their destination (${discArrived} of ${discTotal}). Of ${noDiscTotal.toLocaleString()} who did not disclose, <strong>${Math.round(rateNoDisc*100)}% arrived</strong> (${noDiscArrived} of ${noDiscTotal}).`+
+          (discF2fN&&noDiscF2fN ? ` Avg face-to-face time: ${Math.round(discF2fSum/discF2fN)} min (disclosed) vs ${Math.round(noDiscF2fSum/noDiscF2fN)} min (not disclosed).` : ''),
+        implication:'<strong>Implication:</strong> Self-disclosure validates as the strongest in-encounter rapport signal. <strong>Caveat:</strong> Association is not strict causation — clients more likely to arrive may also be more likely to disclose.',
+        audiences:['Provider','Funder','Payer']
+      };
+    }
+    result.featured = featured;
+  }
+
+  return result;
 }
 
 function engagementRecordsFromPivot(found){
