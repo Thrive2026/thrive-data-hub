@@ -838,7 +838,11 @@ const DIR={
 // Phillips, Muneera Novak, M. Banner) who are NOT on this allowlist and will be told they're
 // signed in but not authorized if they try. Reading the roster is still open to anyone with the
 // link, unchanged from before — only the edit-unlock step goes through real auth now.
-const dsSb = supabase.createClient(SB_URL, SB_KEY);
+// FIX (9/30): roster unlock hung forever on "Signing in…". supabase-js v2 serializes auth calls
+// through a browser-wide lock shared by every Thrive Tools tab on this site; a stale session or
+// another open hub tab holding that lock left signInWithPassword() waiting indefinitely. This hub
+// only uses auth for the one-off roster unlock, so it gets its own session key and skips the lock.
+const dsSb = supabase.createClient(SB_URL, SB_KEY, {auth:{storageKey:'thrive-ds-roster-auth', lock:async(_n,_t,fn)=>await fn()}});
 const EDIT_ALLOWLIST = ['brandonb@thrivepeersupport.com','achuppa@thrivepeersupport.com','sneff@thrivepeersupport.com'];
 function editLocked(){return !S.editUnlocked;}
 const COMMUNITY_MGRS=['Brian','Cara','John','Luke'];
@@ -5789,14 +5793,26 @@ async delSRow(enc){
     if(err) err.style.display='none';
     if(!email||!password){ showErr('Enter your email and password.'); return; }
     if(btn){btn.disabled=true;btn.textContent='Signing in…';}
-    const {data,error}=await dsSb.auth.signInWithPassword({email,password});
+    // FIX (9/30): never leave the button stuck — time out after 15s and show what happened.
+    const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('No response from the sign-in server after '+(ms/1000)+'s. Check your connection, close other Thrive Tools tabs, and try again.')),ms))]);
+    let data,error;
+    try{ ({data,error}=await withTimeout(dsSb.auth.signInWithPassword({email,password}),15000)); }
+    catch(e){ error=e; }
     if(error){
       showErr('Sign-in failed: '+error.message);
       if(btn){btn.disabled=false;btn.textContent='Unlock';}
       return;
     }
-    const {data:reviewer,error:rErr}=await dsSb.from('reviewers').select('name,role,email').eq('id',data.user.id).single();
-    if(rErr||!reviewer||!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())){
+    let reviewer,rErr;
+    try{ ({data:reviewer,error:rErr}=await withTimeout(dsSb.from('reviewers').select('name,role,email').eq('id',data.user.id).single(),15000)); }
+    catch(e){ rErr=e; }
+    if(rErr && !reviewer){
+      showErr('Signed in, but couldn\'t check roster permissions: '+(rErr.message||rErr));
+      await dsSb.auth.signOut();
+      if(btn){btn.disabled=false;btn.textContent='Unlock';}
+      return;
+    }
+    if(!reviewer||!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())){
       showErr('Signed in' + (reviewer?.name?(' as '+reviewer.name):'') + ', but this account isn\'t authorized to edit the roster. Contact Brandon.');
       await dsSb.auth.signOut();
       if(btn){btn.disabled=false;btn.textContent='Unlock';}
