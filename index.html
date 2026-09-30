@@ -935,7 +935,7 @@ const SDEF=[
   {id:904, fn:'Michael',   ln:'Lutz',        mgr:'Jessica', tp:'FT',reg:'ALS',                 nt:'Mendedeed'},
   {id:875, fn:'Jennifer',  ln:'Barbera',     mgr:'Jessica', tp:'FT',reg:'Trumbull',            nt:'Transitioning 5/11'},
   {id:915, fn:'Sarah',     ln:'Adams',       mgr:'Jessica', tp:'FT',reg:'ALS',                 nt:'ALS Liaison—no billables'},
-  {id:940, fn:'Jessica',   ln:'Martin',      mgr:'Jessica', tp:'FT',reg:'Trumbull',             nt:'New hire eff. 6/15/2026 — Trumbull Jail, ID pending — replaces Jennifer Barbera'},
+  {id:940, fn:'Jessica',   ln:'Marton',      mgr:'Jessica', tp:'FT',reg:'Trumbull',             nt:'New hire eff. 6/15/2026 — Trumbull Jail, ID pending — replaces Jennifer Barbera'},
   {id:247, fn:'Nancy',     ln:'Joseph',      mgr:'Angelica',tp:'PT',reg:'Metro Parma',         nt:'OD2A',program:'Hospital'},
   {id:408, fn:'Rondye',    ln:'Brown',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Team Lead, 3rd shift — was misfiled under Hospital before Crisis Center had its own hub, corrected 9/11',program:'Crisis Center',email:'rbrown@thrivepeersupport.com',role:'team_lead',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:true,dateOfHire:'2026-07-27',supervisorId:548},
   {id:460, fn:'Stephen',   ln:'Sidoti',      mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
@@ -1394,7 +1394,7 @@ async function parseKlip(arrayBuffer){
     John:['Steven Sweatte','Nicole Descenna','Scott Works','Judy Middleton','Jeffery Magden','Charlotte Bobbitt','Michael Montalvo','Nadia Castille','Sky Kelley','Melvina Williams','Philip Taylor','William Mayor Jr.'],
     Luke:['Royce Ruffin','Laura Jackson','Melissa McCauley','Jennifer Greenwald','Chanae Jordan','Angela Jones','James Zimmerman','Carmelita Woods','Charlotte Murdock','Robert Woods','Darrell Williams','Kayla Wludyga','Brandi Headley'],
     Rachel:['Nancy Begly','Kristy Temple','Mario Linder','Kelly Brewer','Rashad Alaji','Brian Edwards','Christopher Cooper','Jeffrey Collins','Whister Winford','Elisabeth Pressler','Aubrey Dobrzeniecki','Carmen Manuel'],
-    Jessica:['Jennifer Barbera','Brandy Altop','Mario Ybarbo','Juanita Webb','Florencia Willis','Misty Breedlove','Jordan Ray','Ashley Allen','Michael Lutz','Sarah Adams','Jessica Ripley'],
+    Jessica:['Jennifer Barbera','Brandy Altop','Mario Ybarbo','Juanita Webb','Florencia Willis','Misty Breedlove','Jordan Ray','Ashley Allen','Michael Lutz','Sarah Adams','Jessica Ripley','Jessica Marton'],
     Angelica:['Nancy Joseph','Rondye Brown','Stephen Sidoti','Susan Zelenka','David Begly','Tamara Ash','Derek Christopher','Anna Stevens','Jacqueline Kovach','Gabrielle Sabolich','La Vinia Evans','Ross Scott','Janine Roulette','Raegen Dalton','Hunter-Dane von Carlowitz'],
     // NOTE (9/10/26): this list also includes Jessica Weygandt, Alyse Byrd, and David Lundgren —
     // confirmed former Linkage staff. Deliberately NOT removed here, unlike the display rosters
@@ -4476,6 +4476,9 @@ const SUP_NAME_ALIASES={
   'raegan dalton':'raegen dalton',
   'kayla wludya':'kayla wludyga',
   'hunter von carlowitz':'hunter-dane von carlowitz',
+  // FIX (9/30): roster had her as 'Jessica Martin' (typo); Pimsy/Courts Hub use 'Jessica Marton'.
+  // Keeps any supervision history recorded under the old spelling attached to her.
+  'jessica martin':'jessica marton',
 };
 function foldSupAliases(data){
   const merged={...data};
