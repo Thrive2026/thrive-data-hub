@@ -1953,6 +1953,7 @@ const DATA_CATALOG = [
   {registryKey:null, label:'BD Leads', supaKey:'bd_leads', uploadedVia:'Business Development Dashboard', consumers:'BD Dashboard', cadenceDays:null, note:'Confirmed 9/15/26 still accurate: ongoing manual add/edit/delete, not a periodic file upload — a freshness date doesn’t map onto this cleanly, so left untracked here on purpose.'},
   {registryKey:'bd_referrals', label:'BD Referral Volume', supaKey:'bd_referrals', uploadedVia:'Data & Staff Hub (moved 9/24/26)', consumers:'BD Dashboard', cadenceDays:null, note:"Moved here 9/24/26 per Brandon's centralization direction. Referral Volume tab itself is still hidden in BD Dashboard (per Brandon 9/10/26) pending real UX work — this upload just gives the CSV import one home instead of two, so whenever that tab is rebuilt the data is already flowing through here."},
   {registryKey:'optum_sla', label:'Optum SLA & Disenrollment (Referral Export)', supaKey:'linkage_optum_actuals', uploadedVia:'Data & Staff Hub (moved 9/24/26)', consumers:'BH Linkage Hub (Optum SLA tab), Director Hub (ROI/Cost Trends)', cadenceDays:30, note:"Moved here 9/24/26 per Brandon's centralization direction — was previously only in Linkage Hub. Reads the Optum referral-tracker export's ADT Notification Received Date / Follow-Up Within 24 Business Hours / Disenrollment Date columns, aggregates by month, and merges into the same linkage_optum_actuals key Linkage Hub already reads live. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance remain manual entry in Linkage Hub — no source column for those in this export."},
+  {registryKey:'sli_assessments', label:'SLI Screeners (ongoing)', supaKey:'sli_assessments (real table, not appdata)', uploadedVia:'Data & Staff Hub (added 9/30/26)', consumers:'Every live screener metric ecosystem-wide — Community/CCJ tiles, Outcomes Summary avg-PHQ-9, CCJ contract Outcome 4, live_screener_summary()', cadenceDays:14, note:"New 9/30/26 — the one-time historical backfill into sli_assessments closed 9/21/26 with nothing feeding it since; this is the real ongoing bridge. Re-derives every score through sliComputeScores() from the same granular Pimsy Screeners export used for the backfill, replays the live tool's own is_current/supersede + assessment_type sequencing logic, and skips sessions already on file — safe to re-upload the same full all-time export every time. See ecosystem-next-steps-tracker.md's 9/30/26 sections for the mapping validation this is built on."},
 ];
 function catalogFreshness(entry, cadenceDays){
   if(!entry || !entry.uploaded_at) return {label:'Never uploaded', cls:'bad'};
@@ -2880,6 +2881,30 @@ function modH(){
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevBdRef=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitBdRef()">Confirm Import</button></div>
       </div>`;
       })()):''}
+    </div>
+    <div style="background:#eef2fb;border:1px solid #c3d0ef;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🧠 SLI Screeners <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Ongoing · feeds sli_assessments</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the same Pimsy Screeners export used for the historical backfill (.xlsx, one row per client/session/question — "Thrive Screener" / "Thrive Screener 2.0" audits). Re-derives every score through the real, shared scoring engine and writes new sessions into <code>sli_assessments</code> — the same table every live screener metric ecosystem-wide reads from. Safe to re-upload the full all-time export every time: sessions already on file (matched by client + exact session date) are automatically skipped, never duplicated. Other audit types in the file (Client Automated Measures, BARC-10, EUROHIS-QOL, etc.) are not SLI 2.0 and are left out, same as the historical backfill.</div>
+      <input type="file" accept=".xlsx,.xls" onchange="H.slotFileSliScreeners(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevSliScreeners?(M.prevSliScreeners.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevSliScreeners.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevSliScreeners=null;H.om('data');">OK</button></div></div>`
+        :M.prevSliScreeners.loading?`<div style="font-size:12px;color:#3e4a78;margin-top:8px">Reading and scoring — this file is large, give it a moment…</div>`
+        :M.prevSliScreeners.committing?`<div style="font-size:12px;color:#3e4a78;margin-top:8px">Writing to Supabase (${M.prevSliScreeners.total} session${M.prevSliScreeners.total!==1?'s':''} to check/insert) — do not close this tab…</div>`
+        :(M.prevSliScreeners.scoredCount===0?`<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#92400E">No complete Thrive Screener / Thrive Screener 2.0 sessions found in ${xe(M.prevSliScreeners.sourceFilename)} — nothing to import.</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevSliScreeners=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const p = M.prevSliScreeners;
+        const lvl = p.levelCounts;
+        const levelRow = [1,2,3,4,5].map(l=>`L${l}: <strong>${lvl[l]||0}</strong>`).join(' · ');
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — SLI Screeners (${p.scoredCount} scoreable session${p.scoredCount!==1?'s':''} across ${p.distinctClients} client${p.distinctClients!==1?'s':''})</div>
+        <div style="font-size:12px;color:#3e4a78;line-height:1.7">
+          <div>Computed Support Level distribution (before dedup): ${levelRow}</div>
+          <div>⚠️ <strong>${p.issueSessionCount}</strong> session${p.issueSessionCount!==1?'s':''} had at least one unmatched/missing question (still scored from what was found — matches this pipeline's validated behavior, not a reason to block import)</div>
+          <div>🗂️ <strong>${p.skippedIncomplete}</strong> session${p.skippedIncomplete!==1?'s':''} skipped as incomplete saves (fewer than 10 answered questions)</div>
+          <div>➖ <strong>${p.skippedOtherAudit}</strong> row${p.skippedOtherAudit!==1?'s':''} in other audit types, not SLI 2.0, left out (not written anywhere)</div>
+        </div>
+        <div style="font-size:11px;color:#8089a8;margin-top:8px">This is a full re-scan of every session in the file, not just new ones — if this is the same all-time export you've uploaded before, most of the ${p.scoredCount} above are almost certainly already on file. <strong>Confirm Import</strong> checks Supabase per client and only writes sessions that aren't already there; nothing is duplicated. Recommend spot-checking a client or two against Pimsy directly the first time you run this.</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevSliScreeners=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitSliScreeners()">Confirm Import</button></div>
+      </div>`;
+      })())):''}
     </div>
     <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔔 Renewals</div>
@@ -4464,6 +4489,697 @@ function parseBdReferralCsv(text){
     rows.push({ org, region:region||'', counts, notes });
   }
   return { rows, skipped };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// EMBEDDED COPY of sli-scoring.js (SLI 2.0 scoring engine), added 9/30/26 for
+// the SLI Ongoing Ingest bridge below. This repo has no relative-script-
+// include mechanism (every parser in this file is self-contained, unlike
+// sliassessment.html/treatmentplan.html/psychotherapynote.html, which load
+// sli-scoring.js via <script src>) -- so this is a byte-for-byte copy, kept
+// in sync manually. ANY future change to sli-scoring.js (a scoring formula,
+// a new ASAM wording, a new BAM item) needs to be applied here too, or this
+// ingest path will silently drift from what the live clinical tools compute.
+// ══════════════════════════════════════════════════════════════════════════
+var SLI_ASAM_DIMENSIONS = [
+  'Acute Intoxication and/or Withdrawal Potential',
+  'Biomedical Conditions and Complications',
+  'Emotional, Behavioral, or Cognitive Conditions and Complications',
+  'Readiness to Change',
+  'Relapse, Continued Use, or Continued Problem Potential',
+  'Recovery/Living Environment'
+];
+var SLI_ASAM_DIMENSION_OPTIONS = [
+  [ // Acute Intoxication and/or Withdrawal Potential
+    { label: 'No withdrawal risk', level: 0.5, otp: false, points: 0 },
+    { label: 'Not experiencing significant withdrawal or at minimal risk of severe withdrawal, manageable at Level 1-WM', level: 1.0, otp: false, points: 2 },
+    { label: 'Physiologically dependent on opioids and requires OTP to prevent withdrawal', level: 1.0, otp: true, points: 1 },
+    { label: 'Minimal risk of severe withdrawal', level: 2.1, otp: false, points: 2 },
+    { label: 'Moderate risk of severe withdrawal', level: 2.5, otp: false, points: 2 },
+    { label: 'No withdrawal risk, or minimal or stable withdrawal', level: 3.1, otp: false, points: 3 },
+    { label: 'Minimal risk of severe withdrawal, manageable withdrawal', level: 3.3, otp: false, points: 3 },
+    { label: 'Minimal severe withdrawal risk, manageable withdrawal', level: 3.5, otp: false, points: 3 },
+    { label: 'High withdrawal risk, manageable withdrawal risk', level: 3.7, otp: false, points: 4 },
+    { label: 'High withdrawal risk requiring full hospital resources', level: 4.0, otp: false, points: 4 }
+  ],
+  [ // Biomedical Conditions and Complications
+    { label: 'None, or stable', level: 0.5, otp: false, points: 0 },
+    { label: 'None, or stable', level: 1.0, otp: false, points: 1 },
+    { label: 'None, or manageable', level: 1.0, otp: true, points: 1 },
+    { label: 'None, or not distracting', level: 2.1, otp: false, points: 2 },
+    { label: 'None, or not distracting', level: 2.5, otp: false, points: 2 },
+    { label: 'None, or stable', level: 3.1, otp: false, points: 3 },
+    { label: 'None, or stable', level: 3.3, otp: false, points: 3 },
+    { label: 'None, or stable', level: 3.5, otp: false, points: 3 },
+    { label: 'Requires 24-hour medical monitoring', level: 3.7, otp: false, points: 4 },
+    { label: 'Incapacitated by medical illness, requires hospital-level stabilization', level: 4.0, otp: false, points: 4 }
+  ],
+  [ // Emotional, Behavioral, or Cognitive Conditions and Complications
+    { label: 'None, or stable', level: 0.5, otp: false, points: 0 },
+    { label: 'None, or stable', level: 1.0, otp: false, points: 1 },
+    { label: 'None, or manageable', level: 1.0, otp: true, points: 1 },
+    { label: 'Mild severity', level: 2.1, otp: false, points: 2 },
+    { label: 'Mild to moderate severity', level: 2.5, otp: false, points: 2 },
+    { label: 'None or minimal', level: 3.1, otp: false, points: 3 },
+    { label: 'Mild to moderate', level: 3.3, otp: false, points: 3 },
+    { label: '24-hour setting for stabilization', level: 3.5, otp: false, points: 3 },
+    { label: 'Moderate severity, requires 24-hour structured setting', level: 3.7, otp: false, points: 4 },
+    { label: 'Severe symptoms posing danger to self or others, requires inpatient psychiatric care', level: 4.0, otp: false, points: 4 }
+  ],
+  [ // Readiness to Change
+    { label: 'Willing to explore how use affects personal goals', level: 0.5, otp: false, points: 0 },
+    { label: 'Ready for recovery, needs strategies to strengthen readiness', level: 1.0, otp: false, points: 1 },
+    { label: 'Ready to change, but not ready for total abstinence', level: 1.0, otp: true, points: 1 },
+    { label: 'Variable treatment engagement, requires structured program', level: 2.1, otp: false, points: 2 },
+    { label: 'Poor treatment engagement, needs near-daily structured program', level: 2.5, otp: false, points: 2 },
+    { label: 'Open to recovery, needs structured environment', level: 3.1, otp: false, points: 3 },
+    { label: 'Needs interventions to engage and stay in treatment', level: 3.3, otp: false, points: 3 },
+    { label: 'Has significant difficulty with treatment, with negative consequences', level: 3.5, otp: false, points: 3 },
+    { label: 'Low interest in treatment, needs motivational strategies in 24-hour structured setting', level: 3.7, otp: false, points: 4 },
+    { label: 'Unable to see connection between use and negative consequences, cannot engage in treatment', level: 4.0, otp: false, points: 4 }
+  ],
+  [ // Relapse, Continued Use, or Continued Problem Potential
+    { label: 'Needs understanding or skills to change current use or high-risk behavior', level: 0.5, otp: false, points: 0 },
+    { label: 'Able to maintain abstinence or control use with minimal support', level: 1.0, otp: false, points: 1 },
+    { label: 'At risk of continued use without OTP', level: 1.0, otp: true, points: 1 },
+    { label: 'High likelihood of relapse without close monitoring and support', level: 2.1, otp: false, points: 2 },
+    { label: 'High likelihood of relapse without near-daily monitoring and support', level: 2.5, otp: false, points: 2 },
+    { label: 'Understands relapse, needs structure', level: 3.1, otp: false, points: 3 },
+    { label: 'Needs intervention to prevent relapse', level: 3.3, otp: false, points: 3 },
+    { label: 'Needs intervention to prevent relapse', level: 3.5, otp: false, points: 3 },
+    { label: 'Challenges controlling use at less intensive care levels', level: 3.7, otp: false, points: 4 },
+    { label: 'No relapse-prevention skills, repeated treatment has not improved functioning', level: 4.0, otp: false, points: 4 }
+  ],
+  [ // Recovery/Living Environment
+    { label: 'Environment increases risk of use', level: 0.5, otp: false, points: 0 },
+    { label: 'Supportive environment, patient has coping skills', level: 1.0, otp: false, points: 1 },
+    { label: 'Supportive environment, patient has coping skills', level: 1.0, otp: true, points: 1 },
+    { label: 'Unsupportive environment, patient has coping skills', level: 2.1, otp: false, points: 2 },
+    { label: 'Unsupportive environment, cope with structure and support', level: 2.5, otp: false, points: 2 },
+    { label: 'Unsupportive environment, cope with structure and support', level: 3.1, otp: false, points: 3 },
+    { label: 'Dangerous environment, 24-hour structure needed', level: 3.3, otp: false, points: 3 },
+    { label: 'Dangerous environment, highly structured 24-hour setting needed', level: 3.5, otp: false, points: 3 },
+    { label: 'Dangerous environment', level: 3.7, otp: false, points: 4 },
+    { label: 'Environment is hostile and actively unsafe, patient cannot cope without removal', level: 4.0, otp: false, points: 4 }
+  ]
+];
+var SLI_BAM_SCORED_KEYS = [
+  'physical_health', 'sleep_trouble', 'mood_distress', 'alcohol_days', 'heavy_drinking_days',
+  'drug_days', 'cravings', 'abstinence_confidence', 'self_help_days', 'risky_situations_days',
+  'spirituality', 'work_school_days', 'income_sufficient', 'relationship_problems',
+  'supportive_contact_days', 'recovery_satisfaction'
+];
+var SLI_CSSRS_KEYS = ['1a', '1b', '1c', '1d', '1e', '1f'];
+var SLI_CSSRS_ESCALATION_KEYS = ['1c', '1d', '1e', '1f'];
+var SLI_RISK_EXTRA_KEYS = ['harm_others', 'abuse', 'psychosis'];
+var SLI_SDOH_KEYS = ['housing', 'food_utilities', 'transportation', 'healthcare_access', 'isolation', 'legal_safety'];
+var SLI_LEVEL_TABLE = [
+  { min: 0, max: 5, level: 1, label: 'Level 1 — Maintenance', hours: '1-2 hrs/wk' },
+  { min: 6, max: 8, level: 2, label: 'Level 2 — Moderate', hours: '2-4 hrs/wk' },
+  { min: 9, max: 11, level: 3, label: 'Level 3 — High', hours: '4-6 hrs/wk' },
+  { min: 12, max: 14, level: 4, label: 'Level 4 — Intensive', hours: '6-8 hrs/wk' },
+  { min: 15, max: 9999, level: 5, label: 'Level 5 — Critical', hours: '8+ hrs/wk (Director approval required)' }
+];
+function sliSum(arr) {
+  return arr.reduce(function(a, b) { return a + (b === null || b === undefined ? 0 : b); }, 0);
+}
+function sliBandFromTable(raw, table) {
+  for (var i = 0; i < table.length; i++) {
+    if (raw >= table[i].min && raw <= table[i].max) return table[i];
+  }
+  return table[table.length - 1];
+}
+function sliComputeScores(state, opts) {
+  opts = opts || {};
+  var sdoh = opts.sdoh || state.sdoh;
+  var phq9Raw = sliSum(state.phq9);
+  var phq9Band = sliBandFromTable(phq9Raw, [
+    { min: 0, max: 9, label: '0-9 Minimal', points: 1 },
+    { min: 10, max: 14, label: '10-14 Mild-Moderate', points: 2 },
+    { min: 15, max: 19, label: '15-19 Moderate-Severe', points: 3 },
+    { min: 20, max: 27, label: '20-27 Severe', points: 4 }
+  ]);
+  var gad7Raw = sliSum(state.gad7);
+  var gad7Band = sliBandFromTable(gad7Raw, [
+    { min: 0, max: 9, label: '0-9 Minimal', points: 1 },
+    { min: 10, max: 14, label: '10-14 Mild-Moderate', points: 2 },
+    { min: 15, max: 19, label: '15-19 Moderate-Severe', points: 3 },
+    { min: 20, max: 21, label: '20-21 Severe', points: 4 }
+  ]);
+  // See sli-scoring.js (canonical copy) for the full FIX history/rationale behind
+  // this unreversed BAM sum, the ASAM floor+exceptions logic, and the risk bands.
+  var bamRaw = sliSum(SLI_BAM_SCORED_KEYS.map(function(k) { return state.bam[k]; }));
+  var bamBand = sliBandFromTable(bamRaw, [
+    { min: 0, max: 20, label: '0-20 Low Risk', points: 1 },
+    { min: 21, max: 35, label: '21-35 Moderate Risk', points: 2 },
+    { min: 36, max: 45, label: '36-45 High Risk', points: 3 },
+    { min: 46, max: 9999, label: '46+ Very High Risk', points: 4 }
+  ]);
+  var asamRaw = state.asam_mh_only ? 0 : sliSum(state.asam_dims.map(function(lvl, i) {
+    if (lvl == null) return 0;
+    var pts = state.asam_dimension_points && state.asam_dimension_points[i];
+    return (pts === 0 || pts) ? pts : Math.floor(lvl);
+  }));
+  var asamBand = state.asam_mh_only
+    ? { label: 'N/A (MH Only)', points: 0 }
+    : sliBandFromTable(asamRaw, [
+        { min: 0, max: 6, label: '0-6 Early/Outpatient', points: 1 },
+        { min: 7, max: 12, label: '7-12 IOP', points: 2 },
+        { min: 13, max: 17, label: '13-17 Residential', points: 3 },
+        { min: 18, max: 9999, label: '18-24 Intensive', points: 4 }
+      ]);
+  var escalation = SLI_CSSRS_ESCALATION_KEYS.some(function(k) { return state.cssrs[k] === 1; });
+  var riskExtraRaw = sliSum(SLI_RISK_EXTRA_KEYS.map(function(k) { return state.risk_extra[k]; }));
+  var riskRaw = sliSum(SLI_CSSRS_KEYS.map(function(k) { return state.cssrs[k]; })) + riskExtraRaw;
+  var riskBand;
+  if (escalation || riskRaw >= 4) riskBand = { label: 'High Risk', points: 2 };
+  else if (riskRaw >= 1) riskBand = { label: 'Low-Moderate Risk', points: 1 };
+  else riskBand = { label: 'No Risk', points: 0 };
+  var sdohScore = sdoh ? sliSum(SLI_SDOH_KEYS.map(function(k) { return sdoh[k]; })) : 0;
+  var clinicalScore = phq9Band.points + gad7Band.points + bamBand.points + asamBand.points + riskBand.points;
+  var adjustedSli = clinicalScore + sdohScore;
+  var lowClinicalFlag = clinicalScore <= 4;
+  var highSdohFlag = sdohScore >= 3;
+  var cap = lowClinicalFlag && highSdohFlag;
+  var calculatedLevel = cap ? SLI_LEVEL_TABLE[0] : sliBandFromTable(adjustedSli, SLI_LEVEL_TABLE);
+  var directorReviewRequired = calculatedLevel.level === 5 && !cap;
+  return {
+    phq9Raw: phq9Raw, phq9Band: phq9Band,
+    gad7Raw: gad7Raw, gad7Band: gad7Band,
+    bamRaw: bamRaw, bamBand: bamBand,
+    asamRaw: asamRaw, asamBand: asamBand,
+    escalation: escalation, riskRaw: riskRaw, riskBand: riskBand,
+    sdohScore: sdohScore,
+    clinicalScore: clinicalScore, adjustedSli: adjustedSli,
+    lowClinicalFlag: lowClinicalFlag, highSdohFlag: highSdohFlag, cap: cap,
+    calculatedLevel: calculatedLevel, directorReviewRequired: directorReviewRequired
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SLI ONGOING INGEST — question/answer mapping + session builder.
+// Production port of the validated dry-run modules (sli-question-map.js +
+// build-session-state.js), prefixed SLIQ_ throughout to avoid any collision
+// with Data Hub's own globals (this file already has an unrelated top-level
+// `const norm` at line ~3496). Logic is UNCHANGED from the validated version
+// -- see ecosystem-next-steps-tracker.md's "Resolved, 9/30/26" section for
+// the validation results this is based on: 100% exact match against the
+// original backfill's ground-truth scored output (sli_backfill_data.json) on
+// all 5,214 real, complete matched sessions, across every scoring-relevant
+// field (PHQ-9, GAD-7, BAM, ASAM, C-SSRS, risk-extra, SDOH), PLUS (new, this
+// build) the assessment_type sequencing rule and the is_current selection
+// rule below are ALSO independently confirmed at 100% against ground truth's
+// own stored assessment_type/is_current values on all 5,429 backfilled rows.
+//
+// NOTE on scope: only fields that feed sliComputeScores()'s real Support
+// Level math are validated to a hard standard. A handful of pass-through
+// columns that exist in the real sli_assessments schema (phq9_hospitalizations,
+// gad7_functional_impact, asam_loc_recommendation, the 5 unscored BAM
+// columns, risk_full_columbia_needed) are deliberately NOT populated by this
+// ingest -- confirmed against sli_backfill_data.json that the ORIGINAL
+// backfill never populated them either (0/5429 non-null on every one of
+// these columns), so this is not a new gap, just an unsolved one carried
+// forward rather than guessed at. Can be added later as its own scoped piece
+// of work if wanted -- see the tracker doc.
+// ══════════════════════════════════════════════════════════════════════════
+
+function SLIQ_norm(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/_x000D_/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function SLIQ_normLower(s) { return SLIQ_norm(s).toLowerCase(); }
+function SLIQ_stripTrailingParenNum(s) { return s.replace(/\s*\(\d+\)\s*$/, '').trim(); }
+function SLIQ_scaleLookup(map) {
+  return function (answer) {
+    var a = SLIQ_stripTrailingParenNum(SLIQ_normLower(answer));
+    if (Object.prototype.hasOwnProperty.call(map, a)) return map[a];
+    return null;
+  };
+}
+var SLIQ_SCALE_FREQ_0TO3 = SLIQ_scaleLookup({ 'not at all': 0, 'several days': 1, 'more than half the days': 2, 'nearly every day': 3 });
+var SLIQ_SCALE_BUCKET_DAYS_0TO4 = SLIQ_scaleLookup({ '0': 0, '1-3': 1, '4-8': 2, '9-15': 3, '16-30': 4 });
+var SLIQ_SCALE_INTENSITY_0TO4 = SLIQ_scaleLookup({ 'not at all': 0, 'slightly': 1, 'moderately': 2, 'considerably': 3, 'extremely': 4 });
+var SLIQ_SCALE_HEALTH_0TO4 = SLIQ_scaleLookup({ 'excellent': 0, 'very good': 1, 'good': 2, 'fair': 3, 'poor': 4 });
+var SLIQ_SCALE_YESNO = SLIQ_scaleLookup({ 'no': 0, 'yes': 1 });
+var SLIQ_SCALE_DIFFICULTY_0TO3 = SLIQ_scaleLookup({ 'not difficult at all': 0, 'somewhat difficult': 1, 'very difficult': 2, 'extremely difficult': 3 });
+var SLIQ_PHQ9_ITEMS = [
+  { match: 'little interest or pleasure in doing things', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'feeling down, depressed, or hopeless', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'trouble falling or staying asleep, or sleeping too much', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'feeling tired or having little energy', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'poor appetite or overeating', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'feeling bad about yourself', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'trouble concentrating on things', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'moving or speaking so slowly', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'thoughts that you would be better off dead', scale: SLIQ_SCALE_FREQ_0TO3 }
+];
+var SLIQ_GAD7_ITEMS = [
+  { match: 'feeling nervous, anxious, or on edge', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'not being able to stop or control worrying', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'worrying too much about different things', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'trouble relaxing', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'being so restless that it is hard to sit still', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'becoming easily annoyed or irritable', scale: SLIQ_SCALE_FREQ_0TO3 },
+  { match: 'feeling afraid, as if something awful might happen', scale: SLIQ_SCALE_FREQ_0TO3 }
+];
+var SLIQ_BAM_KEY_MAP = {
+  physical_health: { match: 'in the past 30 days, would you say your physical health has been', scale: SLIQ_SCALE_HEALTH_0TO4 },
+  sleep_trouble: { match: 'how many nights did you have trouble falling asleep or staying asleep', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  mood_distress: { match: 'how many days have you felt depressed, anxious, angry or very upset', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  alcohol_days: { match: 'how many days did you drink any alcohol', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  heavy_drinking_days: { match: 'how many days did you have at least', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  drug_days: { match: 'how many days did you use any illegal/street drugs', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  cravings: { match: 'how much were you bothered by cravings or urges', scale: SLIQ_SCALE_INTENSITY_0TO4 },
+  abstinence_confidence: { match: 'how confident are you in your ability to be completely abstinent', scale: SLIQ_SCALE_INTENSITY_0TO4 },
+  self_help_days: { match: 'how many days did you attend self-help meetings', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  risky_situations_days: { match: 'situations or with any people that might put you at an', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  spirituality: { match: 'does your religion or spirituality help support your recovery', scale: SLIQ_SCALE_INTENSITY_0TO4 },
+  work_school_days: { match: 'how many days did you spend much of the time at work, school', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  income_sufficient: { match: 'do you have enough income (from legal sources)', scale: SLIQ_SCALE_YESNO },
+  relationship_problems: { match: 'how much have you been bothered by arguments or problems getting along', scale: SLIQ_SCALE_INTENSITY_0TO4 },
+  supportive_contact_days: { match: 'how many days were you in contact or spend time with any family members or friends who', scale: SLIQ_SCALE_BUCKET_DAYS_0TO4 },
+  recovery_satisfaction: { match: 'how satisfied are you with your progress toward achieving your recovery goals', scale: SLIQ_SCALE_INTENSITY_0TO4 }
+};
+var SLIQ_ASAM_DIMENSION_MATCH = [
+  'acute intoxication and/or withdrawal potential',
+  'biomedical conditions and complications',
+  'emotional, behavioral, or cognitive conditions and complications',
+  'readiness to change',
+  'relapse, continued use, or continued problem potential',
+  'recovery/living environment'
+];
+var SLIQ_ASAM_MH_ONLY_MATCH = 'is client mh only';
+function SLIQ_extractAsamLevel(answer) {
+  var a = SLIQ_norm(answer);
+  var m = a.match(/(?:OTP-?\s*)?Level\s+([\d.]+)/i);
+  if (m) return parseFloat(m[1]);
+  var bare = a.match(/^(\d+(\.\d+)?)$/);
+  if (bare) return parseFloat(bare[1]);
+  return null;
+}
+function SLIQ_isAsamOtp(answer) { return /OTP[\s-]*Level/i.test(SLIQ_norm(answer)); }
+function SLIQ_lookupAsamPoints(dimIndex, answer, dimensionOptions) {
+  var level = SLIQ_extractAsamLevel(answer);
+  if (level === null) return { level: null, points: null };
+  var otp = SLIQ_isAsamOtp(answer);
+  var label = SLIQ_norm(answer).replace(/\s*\(\s*(?:OTP-)?Level\s+[\d.]+\s*\)\s*$/i, '').trim();
+  var opts = dimensionOptions[dimIndex] || [];
+  for (var i = 0; i < opts.length; i++) {
+    if (opts[i].level === level && opts[i].otp === otp && SLIQ_normLower(opts[i].label) === SLIQ_normLower(label)) {
+      return { level: level, points: opts[i].points };
+    }
+  }
+  for (var j = 0; j < opts.length; j++) {
+    if (opts[j].level === level && opts[j].otp === otp) {
+      return { level: level, points: opts[j].points, labelMismatch: true, sawLabel: label };
+    }
+  }
+  return { level: level, points: Math.floor(level), noOptionMatch: true };
+}
+var SLIQ_CSSRS_ITEM_MATCH = {
+  '1a': 'in the past month, have you wished you were dead',
+  '1b': 'in the past month, have you actually had any thoughts of killing yourself',
+  '1c': 'have you been thinking about how you might kill yourself',
+  '1d': 'have you had these thoughts and had some intention of acting on them',
+  '1e': 'have you started to work out or worked out the details of how to kill yourself',
+  '1f': 'in the past 3 months, have you ever done anything, started to do anything, or prepared to do anything'
+};
+var SLIQ_RISK_EXTRA_MATCH = {
+  harm_others: 'have you had any thoughts of harming someone else',
+  abuse: 'are you currently experiencing any form of abuse or violence',
+  psychosis: 'have you experienced hallucinations, paranoia, or symptoms of psychosis'
+};
+var SLIQ_SDOH_ITEM_MATCH = {
+  housing: 'are you currently experiencing housing instability or worried about losing your housing',
+  food_utilities: 'are you having difficulty affording basic needs like food, utilities, or rent',
+  transportation: 'do you have challenges getting to appointments or places you need to go',
+  healthcare_access: 'is it difficult for you to see a doctor or get healthcare when you need it',
+  isolation: "do you feel isolated or like you don't have people to turn to for help",
+  legal_safety: 'are you dealing with any legal issues or feeling unsafe where you'
+};
+
+// Builds a sliComputeScores()-ready state object from one raw session's rows
+// (array of {q, a, to_date}). Returns { state, issues }.
+function sliqBuildSessionState(rows) {
+  var issues = [];
+  var qRows = rows.map(function (r) {
+    return { qNorm: SLIQ_normLower(r.q), q: r.q, a: r.a, to_date: r.to_date || null };
+  });
+  // Confirmed against real matched ground-truth data (see file header): the
+  // row with no `to_date` is the currently-active answer; when every copy has
+  // since been retired, the one with the LATEST `to_date` was the most
+  // recently-active value before it too was superseded.
+  function pickCurrent(hits) {
+    if (hits.length <= 1) return hits[0] || null;
+    var sorted = hits.slice().sort(function (a, b) {
+      if (a.to_date === null && b.to_date === null) return 0;
+      if (a.to_date === null) return -1;
+      if (b.to_date === null) return 1;
+      return a.to_date < b.to_date ? 1 : (a.to_date > b.to_date ? -1 : 0);
+    });
+    return sorted[0];
+  }
+  function findRow(matchSubstr) {
+    var hits = qRows.filter(function (r) { return r.qNorm.indexOf(matchSubstr) !== -1; });
+    return pickCurrent(hits);
+  }
+  function findAllRows(matchSubstr) {
+    return qRows.filter(function (r) { return r.qNorm.indexOf(matchSubstr) !== -1; });
+  }
+  var phq9 = SLIQ_PHQ9_ITEMS.map(function (item, i) {
+    var row = findRow(item.match);
+    if (!row) { issues.push('phq9[' + i + '] question not found'); return null; }
+    var val = item.scale(row.a);
+    if (val === null) { issues.push('phq9[' + i + '] unmatched answer: "' + row.a + '"'); return null; }
+    return val;
+  });
+  var gad7 = SLIQ_GAD7_ITEMS.map(function (item, i) {
+    var row = findRow(item.match);
+    if (!row) { issues.push('gad7[' + i + '] question not found'); return null; }
+    var val = item.scale(row.a);
+    if (val === null) { issues.push('gad7[' + i + '] unmatched answer: "' + row.a + '"'); return null; }
+    return val;
+  });
+  var bam = {};
+  Object.keys(SLIQ_BAM_KEY_MAP).forEach(function (key) {
+    var spec = SLIQ_BAM_KEY_MAP[key];
+    var candidates = findAllRows(spec.match);
+    var row = pickCurrent(candidates);
+    if (!row) { issues.push('bam.' + key + ' question not found'); bam[key] = null; return; }
+    var val = spec.scale(row.a);
+    if (val === null) { issues.push('bam.' + key + ' unmatched answer: "' + row.a + '"'); bam[key] = null; return; }
+    bam[key] = val;
+  });
+  var mhOnlyRow = findRow(SLIQ_ASAM_MH_ONLY_MATCH);
+  var asamMhOnly = mhOnlyRow ? (SLIQ_SCALE_YESNO(mhOnlyRow.a) === 1) : false;
+  var asamDims = [], asamDimensionPoints = [];
+  SLIQ_ASAM_DIMENSION_MATCH.forEach(function (matchStr, i) {
+    var row = findRow(matchStr);
+    if (!row) { issues.push('asam_dims[' + i + '] question not found'); asamDims.push(null); asamDimensionPoints.push(null); return; }
+    var result = SLIQ_lookupAsamPoints(i, row.a, SLI_ASAM_DIMENSION_OPTIONS);
+    if (result.level === null) issues.push('asam_dims[' + i + '] could not extract level from: "' + row.a + '"');
+    if (result.noOptionMatch) issues.push('asam_dims[' + i + '] no option match for level ' + result.level);
+    asamDims.push(result.level);
+    asamDimensionPoints.push(result.points);
+  });
+  var cssrs = {};
+  Object.keys(SLIQ_CSSRS_ITEM_MATCH).forEach(function (key) {
+    var row = findRow(SLIQ_CSSRS_ITEM_MATCH[key]);
+    if (!row) { issues.push('cssrs.' + key + ' question not found'); cssrs[key] = null; return; }
+    var v = SLIQ_SCALE_YESNO(row.a);
+    if (v === null) { issues.push('cssrs.' + key + ' unmatched answer: "' + row.a + '"'); cssrs[key] = null; return; }
+    cssrs[key] = v;
+  });
+  var riskExtra = {};
+  Object.keys(SLIQ_RISK_EXTRA_MATCH).forEach(function (key) {
+    var row = findRow(SLIQ_RISK_EXTRA_MATCH[key]);
+    if (!row) { issues.push('risk_extra.' + key + ' question not found'); riskExtra[key] = null; return; }
+    var v = SLIQ_SCALE_YESNO(row.a);
+    if (v === null) { issues.push('risk_extra.' + key + ' unmatched answer: "' + row.a + '"'); riskExtra[key] = null; return; }
+    riskExtra[key] = v;
+  });
+  // SDOH: whatever subset of the 6 keys is actually found, matching the
+  // original backfill's own partial-object convention.
+  var sdoh = null, sdohFound = 0, sdohCandidate = {};
+  Object.keys(SLIQ_SDOH_ITEM_MATCH).forEach(function (key) {
+    var row = findRow(SLIQ_SDOH_ITEM_MATCH[key]);
+    if (!row) return;
+    var v = SLIQ_SCALE_YESNO(row.a);
+    if (v !== null) { sdohCandidate[key] = v; sdohFound++; }
+  });
+  if (sdohFound > 0) {
+    sdoh = sdohCandidate;
+    if (sdohFound < 6) issues.push('sdoh partially found (' + sdohFound + '/6)');
+  }
+  var state = {
+    phq9: phq9, gad7: gad7, bam: bam,
+    asam_mh_only: asamMhOnly, asam_dims: asamDims, asam_dimension_points: asamDimensionPoints,
+    cssrs: cssrs, risk_extra: riskExtra, sdoh: sdoh
+  };
+  return { state: state, issues: issues };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SLI ONGOING INGEST — Screeners export → sli_assessments (built 9/30/26)
+//
+// Per ecosystem-next-steps-tracker.md's "New, 9/30/26" / "Resolved, 9/30/26"
+// sections: the ONE-TIME historical backfill into sli_assessments closed out
+// 9/21/26, but nothing has fed that table since — every "live" screener
+// metric ecosystem-wide (Community/CCJ tiles, Outcomes Summary avg-PHQ-9,
+// CCJ's contract Outcome 4, live_screener_summary()) has actually been
+// static since the backfill's cutoff. This is the real ongoing bridge:
+// Brandon uploads the same granular Pimsy Screeners export he'd re-pull any
+// time (one row per client/session/question — identical shape to the
+// historical Audits_all_time.xlsx), this re-derives every score through the
+// real sliComputeScores() engine, and writes new sli_assessments rows,
+// exactly the way the live SLI Assessment tool itself would on a manual save
+// (same is_current/supersede replay, same assessment_type sequencing).
+//
+// The original run-sli-backfill.js script could not be recovered (see the
+// tracker doc) — this mapping was independently reconstructed from
+// sli-backfill-mapping-plan.md's field table and validated directly against
+// the original backfill's own ground-truth scored output
+// (sli_backfill_data.json): 100% exact match across every scoring field
+// (PHQ-9/GAD-7/BAM/ASAM/C-SSRS/risk-extra/SDOH) on 5,214 real sessions, PLUS
+// the assessment_type sequencing rule and the is_current selection rule
+// below are separately confirmed at 100% against ground truth's own stored
+// values on all 5,429 backfilled rows.
+//
+// KNOWN ARCHITECTURE TRADE-OFF, flagged rather than hidden: sli-scoring.js is
+// embedded as a byte-for-byte copy just above rather than loaded via
+// <script src>, because this repo (thrive-data-hub) has no relative-script-
+// include mechanism anywhere else in this file — every existing parser here
+// is fully self-contained. That means sli-scoring.js now has TWO copies to
+// keep in sync (this one, and the one the three clinical tools load
+// directly) — any future scoring-formula or ASAM-wording change needs to be
+// applied to both. Worth a follow-up if this becomes a recurring source of
+// drift.
+//
+// SCOPE, deliberately NOT covered by this build (flagged, not silently
+// dropped): a handful of pass-through columns in the real sli_assessments
+// schema (phq9_hospitalizations, gad7_functional_impact,
+// asam_loc_recommendation, 5 unscored BAM columns, risk_full_columbia_needed)
+// are left null — confirmed against sli_backfill_data.json that the ORIGINAL
+// backfill never populated these either (0/5429 non-null on every one), so
+// this isn't a new gap. The "Client Automated Measures" audit type (and every
+// other non-SLI-2.0 instrument) is out of scope, confirmed by Brandon 9/30/26.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Dedicated xlsx reader for the Screeners export, NOT a reuse of this file's
+// own parseXlsxNamedSheets. Reason: parseXlsxNamedSheets's excelSerialToDate
+// deliberately FLOORS every date-styled cell to midnight UTC of its calendar
+// day (a real, correct fix for a different problem — see that function's own
+// comment) — which would silently collapse two real, distinct same-day
+// sessions for one client into a single grouping key here, or make a genuine
+// re-take look like an already-imported duplicate. This ingestion needs the
+// FULL date+time precision on From Date/To Date to group and dedup sessions
+// correctly, so it keeps its own copy of the ZIP/XML reading logic with a
+// non-flooring date converter, rather than changing the shared function
+// underneath 10+ other working parsers that rely on its current behavior.
+function sliqReadScreenersWorkbook(buf){
+  const b=new Uint8Array(buf), dec=new TextDecoder();
+  function u16(i){return b[i]|(b[i+1]<<8);}
+  function u32(i){return(b[i]|(b[i+1]<<8)|(b[i+2]<<16)|(b[i+3]*0x1000000))>>>0;}
+  let eocd=-1;
+  for(let i=b.length-22;i>=Math.max(0,b.length-65557);i--){if(b[i]===0x50&&b[i+1]===0x4B&&b[i+2]===0x05&&b[i+3]===0x06){eocd=i;break;}}
+  if(eocd<0)throw new Error('Not a valid Excel file (missing ZIP signature).');
+  const cdCount=u16(eocd+10),cdOffset=u32(eocd+16);
+  const entries={};let pos=cdOffset;
+  for(let e=0;e<cdCount;e++){
+    if(u32(pos)!==0x02014B50)break;
+    const method=u16(pos+10),csize=u32(pos+20),fnLen=u16(pos+28),exLen=u16(pos+30),cmLen=u16(pos+32),lhOff=u32(pos+42);
+    const name=dec.decode(b.slice(pos+46,pos+46+fnLen));
+    entries[name]={method,csize,lhOff};pos+=46+fnLen+exLen+cmLen;
+  }
+  async function readE(name){
+    const e=entries[name]||entries[Object.keys(entries).find(k=>k.endsWith('/'+name)||k===name)];
+    if(!e)throw new Error('Not found in workbook: '+name);
+    const lhFnLen=u16(e.lhOff+26),lhExLen=u16(e.lhOff+28),ds=e.lhOff+30+lhFnLen+lhExLen;
+    const raw=b.slice(ds,ds+e.csize);
+    if(e.method===0)return dec.decode(raw);
+    const st=new DecompressionStream('deflate-raw');
+    const w=st.writable.getWriter();w.write(raw);w.close();
+    const ch=[];const r=st.readable.getReader();
+    while(true){const{done,value}=await r.read();if(done)break;ch.push(value);}
+    const out=new Uint8Array(ch.reduce((a,c)=>a+c.length,0));let p2=0;
+    for(const c of ch){out.set(c,p2);p2+=c.length;}
+    return dec.decode(out);
+  }
+  const px=x=>new DOMParser().parseFromString(x,'text/xml');
+  return (async()=>{
+    let strings=[];
+    try{const ss=await readE('xl/sharedStrings.xml');strings=Array.from(px(ss).querySelectorAll('si')).map(si=>Array.from(si.querySelectorAll('t')).map(t=>t.textContent).join(''));}catch(e){}
+    let dateStyleIdx=new Set();
+    try{
+      const stylesXml=await readE('xl/styles.xml');
+      const sdoc=px(stylesXml);
+      const numFmts={};sdoc.querySelectorAll('numFmts numFmt').forEach(nf=>{numFmts[nf.getAttribute('numFmtId')]=nf.getAttribute('formatCode')||'';});
+      const builtinDateIds=new Set(['14','15','16','17','22']);
+      Array.from(sdoc.querySelectorAll('cellXfs > xf')).forEach((xf,i)=>{
+        const fmtId=xf.getAttribute('numFmtId');
+        const code=numFmts[fmtId]||'';
+        const isDate = builtinDateIds.has(fmtId) || (/[dmy]/i.test(code) && /[dmy]{2,}/i.test(code));
+        if(isDate) dateStyleIdx.add(i);
+      });
+    }catch(e){}
+    // Deliberately NOT floored — preserves the exact fractional day (time of
+    // day) a real Screeners export's From Date/To Date cells carry, needed
+    // for correct session grouping. See the banner comment above this
+    // function for why this can't just reuse parseXlsxNamedSheets.
+    function excelSerialToDateTimeISO(n){
+      const epoch=new Date(Date.UTC(1899,11,30));
+      return new Date(epoch.getTime() + Math.round(n*86400000)).toISOString();
+    }
+    const wbXml=await readE('xl/workbook.xml');
+    const relXml=await readE('xl/_rels/workbook.xml.rels');
+    const idToFile={};px(relXml).querySelectorAll('Relationship').forEach(r=>{const t=r.getAttribute('Target')||'';idToFile[r.getAttribute('Id')]='xl/'+t.replace(/^\//,'').replace(/^\.\.\//,'').replace(/^xl\//,'');});
+    const sheetEls=Array.from(px(wbXml).querySelectorAll('sheet'));
+    // Prefer a sheet whose name mentions "audit" (both real exports so far
+    // have used "Clients Audits All"); fall back to the first sheet.
+    let sheetEl = sheetEls.find(s=>/audit/i.test(s.getAttribute('name')||'')) || sheetEls[0];
+    if(!sheetEl) throw new Error('No sheets found in this workbook.');
+    const rid=sheetEl.getAttribute('r:id')||sheetEl.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id');
+    const file=idToFile[rid];
+    if(!file) throw new Error('Could not resolve the sheet\'s data file.');
+    const xml=await readE(file);
+    const rows=[];
+    px(xml).querySelectorAll('row').forEach(rowEl=>{
+      const row=[];
+      rowEl.querySelectorAll('c').forEach(c=>{
+        const ref=c.getAttribute('r')||'',cs=ref.replace(/[0-9]/g,'');
+        let col=0;for(const ch of cs)col=col*26+ch.charCodeAt(0)-64;col--;
+        const t=c.getAttribute('t');
+        const sIdx=c.getAttribute('s');
+        let val='';
+        if(t==='inlineStr'){
+          const isEl=c.querySelector('is');
+          val=isEl?Array.from(isEl.querySelectorAll('t')).map(tt=>tt.textContent).join(''):'';
+        } else {
+          const vEl=c.querySelector('v');
+          val=vEl?vEl.textContent:'';
+          if(t==='s')val=strings[parseInt(val)]||'';
+          else if(val!==''){
+            const num=+val;
+            if(!isNaN(num) && sIdx!=null && dateStyleIdx.has(parseInt(sIdx))){
+              val = excelSerialToDateTimeISO(num);
+            } else {
+              val = isNaN(num)?val:num;
+            }
+          }
+        }
+        row[col]=val;
+      });
+      for(let j=0;j<row.length;j++)if(row[j]===undefined)row[j]='';
+      if(row.some(v=>v!==''))rows.push(row);
+    });
+    return { sheetName: sheetEl.getAttribute('name')||'', rows: rows };
+  })();
+}
+
+const SLIQ_IN_SCOPE_AUDITS = new Set(['Thrive Screener', 'Thrive Screener 2.0']);
+const SLIQ_INCOMPLETE_ROW_THRESHOLD = 10; // matches the validated backfill/mapping-plan rule
+
+function sliqHeaderIndex(headerRow){
+  const idx={};
+  headerRow.forEach((h,i)=>{
+    const norm = String(h==null?'':h).trim().toLowerCase().replace(/\s+/g,' ');
+    if(norm) idx[norm]=i;
+  });
+  return idx;
+}
+
+// Groups raw Screeners rows into sessions ((Client Number, Audit, From Date)
+// per the mapping plan), scores each in-scope/complete session through the
+// validated sliqBuildSessionState() + sliComputeScores() pipeline, and
+// returns everything the preview UI needs — no Supabase calls yet (those
+// only happen once Brandon clicks Confirm Import; see H.commitSliScreeners
+// below). This up-front, always-run preview IS the "run on a sample, show
+// the resulting rows, spot-check before writing" step sli-backfill-mapping-
+// plan.md called for — every real upload gets one, not just the one-time
+// manual check done before this was built.
+function sliqParseScreenersWorkbook(sheetResult, fileName){
+  const rows = sheetResult.rows;
+  if(!rows || rows.length < 2) throw new Error('No data rows found in this file.');
+  const idx = sliqHeaderIndex(rows[0]);
+  const cClient = idx['client number'];
+  const cAudit = idx['audit'];
+  const cQuestion = idx['question'];
+  const cAnswer = idx['answer'];
+  const cFrom = idx['from date'];
+  const cTo = idx['to date'];
+  const cEditedBy = idx['edited by'];
+  if(cClient==null || cAudit==null || cQuestion==null || cAnswer==null || cFrom==null){
+    throw new Error('Expected columns not found (Client Number / Audit / Question / Answer / From Date) — is this the Screeners export?');
+  }
+
+  const groups = new Map(); // key: client|audit|fromISO -> {client_number,audit,from_date,assessed_by,rows:[]}
+  let totalDataRows = 0, skippedOtherAudit = 0;
+  const auditCounts = {};
+
+  for(let r=1;r<rows.length;r++){
+    const row = rows[r]; if(!row) continue;
+    const q = cQuestion!=null ? row[cQuestion] : '';
+    if(q==null || q===''){ continue; } // junk row, no question at all — matches the mapping plan's documented discard rule
+    totalDataRows++;
+    const audit = String((cAudit!=null?row[cAudit]:'')||'').trim();
+    auditCounts[audit] = (auditCounts[audit]||0)+1;
+    if(!SLIQ_IN_SCOPE_AUDITS.has(audit)){ skippedOtherAudit++; continue; }
+    const clientNum = String((row[cClient]!=null?row[cClient]:'')||'').trim();
+    if(!clientNum) continue;
+    const fromRaw = row[cFrom];
+    const fromISO = (typeof fromRaw==='string' && fromRaw) ? fromRaw : null;
+    if(!fromISO) continue; // no session timestamp — can't group this row to anything
+    const key = clientNum+'|'+audit+'|'+fromISO;
+    let g = groups.get(key);
+    if(!g){ g = { client_number: clientNum, audit: audit, from_date: fromISO, assessed_by: null, rows: [] }; groups.set(key, g); }
+    if(cEditedBy!=null){
+      const eb = String(row[cEditedBy]||'').trim();
+      if(eb && !g.assessed_by) g.assessed_by = eb; // first non-empty "Edited By" seen for this session
+    }
+    const toRaw = cTo!=null ? row[cTo] : null;
+    const toISO = (typeof toRaw==='string' && toRaw) ? toRaw : null;
+    g.rows.push({ q: String(q), a: String(row[cAnswer]==null?'':row[cAnswer]), to_date: toISO });
+  }
+
+  const allSessions = Array.from(groups.values());
+  const complete = [], incomplete = [];
+  allSessions.forEach(s => { (s.rows.length >= SLIQ_INCOMPLETE_ROW_THRESHOLD ? complete : incomplete).push(s); });
+
+  // Score every complete, in-scope session now, client-side, so the preview
+  // shows real computed results — this is the actual spot-check surface.
+  const scored = complete.map(s => {
+    const built = sliqBuildSessionState(s.rows);
+    const isV2 = s.audit === 'Thrive Screener 2.0';
+    // Legacy "Thrive Screener" sessions get no SDOH score, per the design
+    // decision already carried forward in ecosystem-next-steps-tracker.md
+    // (9-item legacy wording doesn't map confidently to the live 6-item
+    // schema) — enforced explicitly here rather than relying on the fact
+    // that the legacy form's wording naturally fails to match anyway.
+    const scores = sliComputeScores(built.state, { sdoh: isV2 ? built.state.sdoh : null });
+    return { session: s, built: built, scores: scores, sdohUsed: isV2 ? built.state.sdoh : null };
+  });
+
+  const distinctClients = new Set(allSessions.map(s=>s.client_number)).size;
+  const levelCounts = {1:0,2:0,3:0,4:0,5:0};
+  let issueSessionCount = 0;
+  scored.forEach(x=>{ levelCounts[x.scores.calculatedLevel.level] = (levelCounts[x.scores.calculatedLevel.level]||0)+1; if(x.built.issues.length) issueSessionCount++; });
+
+  return {
+    sourceFilename: fileName,
+    sheetName: sheetResult.sheetName,
+    totalDataRows, skippedOtherAudit, auditCounts,
+    sessionsInScope: allSessions.length,
+    skippedIncomplete: incomplete.length,
+    distinctClients,
+    scoredCount: scored.length,
+    issueSessionCount,
+    levelCounts,
+    scored: scored, // full list — H.commitSliScreeners uses this directly, no re-parsing
+  };
 }
 
 function normalizeMonthLabel(text){
@@ -7110,6 +7826,177 @@ async delSRow(enc){
     setTimeout(()=>t.remove(),2200);
   },
 };
+
+// ── SLI Screeners ongoing ingest: upload card + preview + commit handlers ──
+// (added 9/30/26 — added here via Object.assign, AFTER H's own closing brace
+// above, rather than as properties inside the H={...} literal itself, since
+// this block's location in the file — right after parseBdReferralCsv, where
+// the pure mapping/scoring logic it depends on also lives — is textually
+// BEFORE `const H=` is declared. Object.assign(H,{...}) executed here, after
+// H already exists, is equivalent to defining these as H's own methods and
+// avoids a temporal-dead-zone ReferenceError.)
+Object.assign(H, {
+  slotFileSliScreeners(inp){
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx workbook directly.'); inp.value=''; return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        M.prevSliScreeners = {loading:true};
+        modH();
+        const sheetResult = await sliqReadScreenersWorkbook(e.target.result);
+        const parsed = sliqParseScreenersWorkbook(sheetResult, f.name);
+        M.prevSliScreeners = parsed;
+        modH();
+      }catch(err){
+        console.warn('[slotFileSliScreeners]', err);
+        M.prevSliScreeners = {error: err.message};
+        modH();
+      }
+    };
+    r.readAsArrayBuffer(f);
+    inp.value='';
+  },
+
+  // Same serialized-write discipline as _plCommitChain/_klipCommitChain/
+  // _optumCommitChain elsewhere in this file — a second upload started before
+  // the first finishes writing must not interleave with it.
+  _sliCommitChain: Promise.resolve(),
+  commitSliScreeners(){
+    if(!M.prevSliScreeners || M.prevSliScreeners.error || M.prevSliScreeners.loading || !M.prevSliScreeners.scoredCount) return;
+    const parsed = M.prevSliScreeners;
+    M.prevSliScreeners = {committing:true, total: parsed.scoredCount};
+    render(); modH();
+    H._sliCommitChain = H._sliCommitChain.then(()=>H._commitSliScreenersNow(parsed)).catch(err=>{
+      console.warn('[commitSliScreeners]', err);
+      showSaveError(`Save failed while importing SLI screeners from ${parsed.sourceFilename||'this file'} — some rows may not have been written. Check Supabase before re-running to avoid duplicate rows, and try again.`);
+      M.prevSliScreeners = null; render();
+    });
+    return H._sliCommitChain;
+  },
+
+  async _commitSliScreenersNow(parsed){
+    const scored = parsed.scored;
+    const clientNums = Array.from(new Set(scored.map(x=>x.session.client_number)));
+
+    // 1. Pull each in-scope client's existing sli_assessments rows (id,
+    // assessment_date, is_current) — needed for dedup, assessment_type
+    // sequencing, and is_current supersede. Chunked to keep the PostgREST
+    // `in.()` filter URL a reasonable length.
+    const existingByClient = {};
+    const CHUNK = 40;
+    for(let i=0;i<clientNums.length;i+=CHUNK){
+      const chunk = clientNums.slice(i,i+CHUNK);
+      const filterList = chunk.map(c=>encodeURIComponent(c)).join(',');
+      const rows = await db.get('sli_assessments', `client_number=in.(${filterList})&select=id,client_number,assessment_date,is_current`);
+      (rows||[]).forEach(r=>{ (existingByClient[r.client_number] = existingByClient[r.client_number] || []).push(r); });
+    }
+
+    // 2. Group this upload's scored sessions by client, sort each client's
+    // NEW sessions chronologically, and — per client — figure out (a) which
+    // are exact-date duplicates of something already stored (skip), and (b)
+    // each survivor's assessment_type by its ordinal position across BOTH
+    // existing and new dates combined (validated 100% against ground truth's
+    // own stored assessment_type — see the banner comment above).
+    const byClient = {};
+    scored.forEach(x => { (byClient[x.session.client_number] = byClient[x.session.client_number] || []).push(x); });
+
+    function typeForOrdinal(n){ return n===1?'Initial':n===2?'30-day':n===3?'90-day':'Ad-hoc'; }
+
+    const toInsert = [];
+    const skippedDuplicate = [];
+    Object.keys(byClient).forEach(cn=>{
+      const existing = existingByClient[cn] || [];
+      const existingDateSet = new Set(existing.map(r=>String(r.assessment_date).slice(0,10)));
+      const arr = byClient[cn].slice().sort((a,b)=> a.session.from_date < b.session.from_date ? -1 : (a.session.from_date > b.session.from_date ? 1 : 0));
+      const newDateSet = new Set();
+      const survivors = [];
+      arr.forEach(x=>{
+        const d = x.session.from_date.slice(0,10);
+        if(existingDateSet.has(d) || newDateSet.has(d)){ skippedDuplicate.push(x); return; }
+        newDateSet.add(d);
+        survivors.push(x);
+      });
+      const allDatesSorted = Array.from(new Set([...existingDateSet, ...newDateSet])).sort();
+      survivors.forEach(x=>{
+        const d = x.session.from_date.slice(0,10);
+        const ordinal = allDatesSorted.indexOf(d) + 1;
+        toInsert.push({ x: x, assessment_type: typeForOrdinal(ordinal), existingCurrent: existing.find(r=>r.is_current) || null });
+      });
+    });
+
+    // 3. Build + insert each row (is_current always false at insert time —
+    // fixed up per-client in step 4, exactly replaying what a sequence of
+    // manual live-tool saves would produce).
+    const inserted = [];
+    for(const item of toInsert){
+      const x = item.x, s = x.scores, built = x.built.state;
+      const row = {
+        client_number: x.session.client_number,
+        assessment_type: item.assessment_type,
+        assessment_date: x.session.from_date,
+        assessed_by: x.session.assessed_by || null,
+        phq9_items: built.phq9, phq9_raw: s.phq9Raw, phq9_band: s.phq9Band.label, phq9_points: s.phq9Band.points,
+        gad7_items: built.gad7, gad7_raw: s.gad7Raw, gad7_band: s.gad7Band.label, gad7_points: s.gad7Band.points,
+        bam_items: built.bam, bam_raw: s.bamRaw, bam_band: s.bamBand.label, bam_points: s.bamBand.points,
+        asam_mh_only: built.asam_mh_only, asam_dimensions: built.asam_dims, asam_dimension_points: built.asam_dimension_points,
+        asam_raw: s.asamRaw, asam_band: s.asamBand.label, asam_points: s.asamBand.points,
+        risk_cssrs: built.cssrs, risk_harm_others: built.risk_extra.harm_others, risk_abuse: built.risk_extra.abuse, risk_psychosis: built.risk_extra.psychosis,
+        risk_raw: s.riskRaw, risk_band: s.riskBand.label, risk_points: s.riskBand.points,
+        sdoh_items: x.sdohUsed, sdoh_barrier_score: x.sdohUsed ? s.sdohScore : null,
+        clinical_score: s.clinicalScore, adjusted_sli: s.adjustedSli,
+        low_clinical_flag: s.lowClinicalFlag, high_sdoh_flag: s.highSdohFlag, service_intensity_cap: s.cap,
+        calculated_support_level: s.calculatedLevel.level, final_support_level: s.calculatedLevel.level,
+        director_review_required: s.directorReviewRequired,
+        is_current: false,
+      };
+      const res = await db.insert('sli_assessments', row);
+      const newId = res && res[0] && res[0].id;
+      if(newId==null){ console.warn('[commitSliScreeners] insert did not return an id, skipping supersede chain for', x.session.client_number, x.session.from_date); continue; }
+      inserted.push({ id: newId, client_number: x.session.client_number, date: x.session.from_date });
+    }
+
+    // 4. Per client, replay the is_current chain in date order: whichever row
+    // — existing current, or the next new one in date order — is the LATEST
+    // becomes current; whatever it superseded gets is_current:false plus
+    // superseded_by pointing at it. This exactly reproduces a sequence of
+    // real manual saves rather than the whole batch racing to be "current."
+    const insertedByClient = {};
+    inserted.forEach(r => { (insertedByClient[r.client_number] = insertedByClient[r.client_number] || []).push(r); });
+    for(const cn of Object.keys(insertedByClient)){
+      const newRows = insertedByClient[cn].slice().sort((a,b)=> a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+      const existingCurrentRow = (existingByClient[cn]||[]).find(r=>r.is_current) || null;
+      let current = existingCurrentRow ? { id: existingCurrentRow.id, date: existingCurrentRow.assessment_date } : null;
+      for(const nr of newRows){
+        if(!current || nr.date > current.date){
+          if(current) await db.update('sli_assessments', current.id, { is_current: false, superseded_by: nr.id });
+          await db.update('sli_assessments', nr.id, { is_current: true });
+          current = nr;
+        } else {
+          // Backdated relative to what's already current (e.g. an out-of-
+          // order re-upload) — never made current, and recorded as already
+          // superseded by whatever is/was current at the time it's imported.
+          await db.update('sli_assessments', nr.id, { is_current: false, superseded_by: current.id });
+        }
+      }
+    }
+
+    const dates = inserted.map(r=>r.date.slice(0,10)).sort();
+    recordImport('sli_assessments', {
+      row_count: inserted.length,
+      period_label: dates.length ? `${dates[0]} to ${dates[dates.length-1]}` : null,
+      data_through: dates.length ? dates[dates.length-1] : null,
+    });
+
+    M.prevSliScreeners = null;
+    render();
+    const t=document.createElement('div');
+    t.textContent=`✓ Imported ${inserted.length} SLI assessment${inserted.length!==1?'s':''} across ${Object.keys(insertedByClient).length} client${Object.keys(insertedByClient).length!==1?'s':''} (${skippedDuplicate.length} already on file, skipped)`;
+    t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+    document.body.appendChild(t);setTimeout(()=>t.remove(),4200);
+  }
+});
 
 document.addEventListener('click',e=>{const rm=document.getElementById('rm');if(rm&&!e.target.closest('#rm')&&!e.target.closest('.role-btn'))rm.style.display='none';});
 
