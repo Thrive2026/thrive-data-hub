@@ -2510,11 +2510,16 @@ function setV(){
     const cityCell=ro?`<span>${xe(s.city||'—')}</span>`:`<input type="text" value="${xe(s.city||'')}" onchange="H.upS(${s.id},'city',this.value)" placeholder="City" style="width:95px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
     const countyCell=ro?`<span>${xe(s.county||'—')}</span>`:`<input type="text" value="${xe(s.county||'')}" onchange="H.upS(${s.id},'county',this.value)" placeholder="County" style="width:85px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
     const zipCell=ro?`<span>${xe(s.zip||'—')}</span>`:`<input type="text" value="${xe(s.zip||'')}" onchange="H.upS(${s.id},'zip',this.value)" placeholder="Zip" style="width:60px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit"/>`;
+    // NEW (9/30): names were display-only, so a roster typo (e.g. 'Jessica Martin' for Marton)
+    // couldn't be corrected without a code change — and a misspelled name silently drops that
+    // person's rows from every name-matched Pimsy import (renewals, supervision). Editable when unlocked.
+    const nmIn=(f,v,ph,w)=>`<input type="text" value="${xe(v||'').replace(/"/g,'&quot;')}" onchange="H.upName(${s.id},'${f}',this)" placeholder="${ph}" style="width:${w}px;font-size:12px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#1a2861;font-weight:500"/>`;
+    const nameCell=ro?`${xe(s.fn)} ${xe(s.ln)}`:`${nmIn('fn',s.fn,'First',80)} ${nmIn('ln',s.ln,'Last',95)}`;
     const noteCell=ro?`<span>${xe(s.nt||'—')}</span>`:`<input type="text" value="${xe(s.nt||'').replace(/"/g,'&quot;')}" onchange="H.upS(${s.id},'nt',this.value)" placeholder="Add note…" style="width:150px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#3e4a78" />`;
     const actionCell=isCCOwned(s)?`<span class="bdg" style="background:#FCE7F3;color:#9D174D;border:1px solid #F9A8D4" title="Crisis Center staff are edited in the Crisis Center hub">Managed in Crisis Center hub</span>`:locked?'':`<button onclick="H.tgS(${s.id})" style="font-size:10px;padding:2px 7px;background:${s.status==='Active'?'#FEE2E2':'#C8E6C9'};color:${s.status==='Active'?'#991B1B':'#1B5E20'};border:none;border-radius:3px;cursor:pointer;font-family:inherit">${s.status==='Active'?'Deactivate':'Activate'}</button>${s.status==='Inactive'?` <button onclick="H.delS(${s.id})" title="Permanently remove — frees this Pimsy ID for reuse. Only for fixing a bad entry, not for someone who actually left (Deactivate keeps their history for that)." style="font-size:10px;padding:2px 7px;background:#fff;color:#991B1B;border:1px solid #991B1B;border-radius:3px;cursor:pointer;font-family:inherit;margin-left:4px">Delete</button>`:''}`;
     return`<tr style="background:${i%2===0?'#fff':'#FAFAFA'}">
       <td style="font-family:monospace;font-size:11px;color:#8089a8">${s.id}</td>
-      <td style="font-weight:500;color:#1a2861">${xe(s.fn)} ${xe(s.ln)}</td>
+      <td style="font-weight:500;color:#1a2861;white-space:nowrap">${nameCell}</td>
       <td>${mgrCell}</td>
       <td>${tpCell}</td>
       <td><span class="bdg" style="background:${s.status==='Active'?'#C8E6C9':'#F3F4F6'};color:${s.status==='Active'?'#1B5E20':'#9CA3AF'}">${s.status}</span></td>
@@ -5790,6 +5795,18 @@ async delSRow(enc){
       return;
     }
     if(transferringToCC)renderV();
+  },
+  async upName(id,field,inp){
+    const v=(inp.value||'').trim().replace(/\s+/g,' ');
+    const cur=S.staff.find(x=>x.id===id);
+    if(!cur){renderV();return;}
+    const old=cur[field]||'';
+    if(!v){alert('Name can\'t be blank.');inp.value=old;return;}
+    if(v===old){inp.value=old;return;}
+    const newFull=field==='fn'?`${v} ${cur.ln}`:`${cur.fn} ${v}`;
+    if(!confirm(`Rename ${cur.fn} ${cur.ln} (ID ${id}) to ${newFull}?\n\nThe name must match how it appears in Pimsy exactly, or their rows won't match on the next import. Re-run the renewals import afterward so their renewals pick up the new name.`)){inp.value=old;return;}
+    await this.upS(id,field,v);
+    renderV();
   },
   ssM(v){S.setMgr=v;renderV();},
   ssS(v){S.setStat=v;renderV();},
