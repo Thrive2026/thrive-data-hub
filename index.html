@@ -3663,6 +3663,16 @@ function aggregateHospitalOutcomes(rows, filename){
   // that's Data Hub's own excluded-name-detection feature and isn't something Outcomes Dashboard
   // has ever done.
   const siteStats={}, staffStats={};
+  // FIX (Hospital Outcomes live bridge, 9/30/26): statusCount/hospitalCount/staffCount below were
+  // only ever populated inside the hasRichColumns branch -- any upload that isn't the full rich
+  // raw-JotForm export (the "simplified monthly" schema, or the true legacy tracker workbook) sent
+  // the live bridge an empty statusCount/hospitalCount, which silently forced the "Engaged" KPI
+  // tile to 100% (total minus a missing key) and "Hospital Sites" to 0 on Program Hub. Caught from
+  // Brandon's real screenshot after a real upload, 9/30/26. generalSiteCount/generalStaffCount/
+  // generalStatusCount below are always computed, from the same engaged/arrivedFlag/didNot values
+  // every format already derives -- the rich branch further below still overrides these with its
+  // richer per-status/per-site breakdown when the columns support it.
+  const generalSiteCount={}, generalStaffCount={}, generalStatusCount={};
   let interested=0, referred=0, transported=0, caresourceLinked=0;
   let disclosed=0, mat=0, familyPresent=0, staffEducated=0, socialReferred=0, linkedThriveCPS=0;
   let discArrived=0, discNotArrived=0, noDiscArrived=0, noDiscNotArrived=0;
@@ -3711,6 +3721,9 @@ function aggregateHospitalOutcomes(rows, filename){
     if(engaged) totalEngaged++;
     if(arrivedFlag) totalArrived++;
     if(didNot) totalDidNot++;
+    if(hosp) generalSiteCount[hosp] = (generalSiteCount[hosp]||0)+1;
+    if(prsRaw) generalStaffCount[prsRaw] = (generalStaffCount[prsRaw]||0)+1;
+    generalStatusCount[didNot?'Peer Did Not Engage at Hospital':'Engaged'] = (generalStatusCount[didNot?'Peer Did Not Engage at Hospital':'Engaged']||0)+1;
     if(hosp){
       if(!siteMap[hosp])siteMap[hosp]={name:hosp,encounters:0,engaged:0,arrived:0};
       siteMap[hosp].encounters++; if(engaged)siteMap[hosp].engaged++; if(arrivedFlag)siteMap[hosp].arrived++;
@@ -3799,7 +3812,11 @@ function aggregateHospitalOutcomes(rows, filename){
     byPRS, sites:Object.values(siteMap).sort((a,b)=>b.encounters-a.encounters),
     txCenters:Object.entries(txMap).sort((a,b)=>b[1]-a[1]),
     excludedNotOnRoster, excludedNames:Array.from(excludedNames),
-    importedAt:new Date().toISOString()
+    importedAt:new Date().toISOString(),
+    // Always present, every format — see the FIX comment above generalSiteCount's declaration.
+    // The rich branch below overrides these three with its richer per-status/per-site breakdown
+    // when the columns support it; otherwise this general version is what the live bridge sends.
+    statusCount: generalStatusCount, hospitalCount: generalSiteCount, staffCount: generalStaffCount
   };
 
   if(hasRichColumns){
