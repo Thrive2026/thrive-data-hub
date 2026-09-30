@@ -842,7 +842,17 @@ const DIR={
 // through a browser-wide lock shared by every Thrive Tools tab on this site; a stale session or
 // another open hub tab holding that lock left signInWithPassword() waiting indefinitely. This hub
 // only uses auth for the one-off roster unlock, so it gets its own session key and skips the lock.
-const dsSb = supabase.createClient(SB_URL, SB_KEY, {auth:{storageKey:'thrive-ds-roster-auth', lock:async(_n,_t,fn)=>await fn()}});
+// FIX (9/30, part 2): the lock wasn't the whole story — this hub caches its big shared datasets
+// (renewals, productivity, linkage, etc.) in localStorage, which fills the browser's ~5 MB quota,
+// so the auth library couldn't even write its session and sign-in failed. The roster unlock only
+// needs a session for this page visit, so it's kept in memory and never touches localStorage.
+const _dsAuthMem = {};
+const dsAuthStorage = {
+  getItem:(k)=> (k in _dsAuthMem ? _dsAuthMem[k] : null),
+  setItem:(k,v)=>{ _dsAuthMem[k]=v; },
+  removeItem:(k)=>{ delete _dsAuthMem[k]; },
+};
+const dsSb = supabase.createClient(SB_URL, SB_KEY, {auth:{storageKey:'thrive-ds-roster-auth', storage:dsAuthStorage, persistSession:true, autoRefreshToken:false, lock:async(_n,_t,fn)=>await fn()}});
 const EDIT_ALLOWLIST = ['brandonb@thrivepeersupport.com','achuppa@thrivepeersupport.com','sneff@thrivepeersupport.com'];
 function editLocked(){return !S.editUnlocked;}
 const COMMUNITY_MGRS=['Brian','Cara','John','Luke'];
