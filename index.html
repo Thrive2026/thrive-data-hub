@@ -2776,6 +2776,7 @@ function modH(){
           ${pkRows.length?pkRows.map(([pk,p])=>`<div style="padding:3px 0;border-bottom:1px solid #f0ece3"><strong>${xe(pk)}</strong> — ${p.activeClients.size} active (${p.totalClients.size} ever assigned)</div>`).join(''):'<div style="color:#8089a8">No rows matched a known program.</div>'}
         </div>
         ${parsed.unmapped.length?`<div style="font-size:11px;color:#8089a8;margin-top:6px">Unmapped divisions seen: ${parsed.unmapped.slice(0,10).map(xe).join(', ')}${parsed.unmapped.length>10?'…':''}</div>`:''}
+        <div style="font-size:11px;color:#8089a8;margin-top:6px">Admission date: ${parsed.admissionColumnFound?`column found, ${parsed.admissionDatesFound} client${parsed.admissionDatesFound===1?'':'s'} dated`:'no matching column in this file'} &nbsp;·&nbsp; Discharge date: ${parsed.dischargeColumnFound?`column found, ${parsed.dischargeDatesFound} client${parsed.dischargeDatesFound===1?'':'s'} dated`:'no matching column in this file'}</div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevDemo=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitDemo()">Confirm Import</button></div>
       </div>`;
       })()):''}
@@ -6273,6 +6274,36 @@ async function olMergeNotesIntoProgramLedger(objRows){
 // GAD-7/Risk/ASAM Improved, and any Contracted Outcome status gated on those. Total Admitted /
 // Active Caseload / Sessions / Revenue stay Notes-only on purpose; those are real billing-
 // activity measures and should keep meaning that.
+// Admission/Discharge dates (added 10/1/26, per Brandon: "the admission and discharge should be
+// in the demographics document" and confirmed directly — "the screeners and discharge and
+// admission cant be pulled on the screener export but comes out of the demo data"). Unlike
+// Client Number/Default Division/Referral Source/Active, there's no single documented header
+// text for either column (the field-list in ecosystem-upload-inventory-and-reduction-plan.md
+// only ever named "Date of Admission"; discharge isn't named anywhere in this project's docs at
+// all), so both are matched tolerantly against a short list of real-world variants rather than
+// one hardcoded string, and both are OPTIONAL — an export missing one, or using wording outside
+// this list, still imports the roster exactly as before; it just won't carry that date for this
+// upload, surfaced via admissionColumnFound/dischargeColumnFound below rather than silently
+// assumed. If Brandon reports a real header that still isn't matching, add it to the list below.
+const OL_ADMISSION_HEADER_CANDIDATES = ['date of admission', 'admission date', 'admit date'];
+const OL_DISCHARGE_HEADER_CANDIDATES = ['date of discharge', 'discharge date', 'date of termination', 'termination date', 'term date', 'date discharged', 'discharge/term date'];
+function olFindDateCol(idx, candidates) {
+  for (const c of candidates) { if (idx[c] != null) return idx[c]; }
+  return null;
+}
+// parseXlsxNamedSheets() (the reader slotFileDemo() uses) already converts any Excel
+// date-styled cell straight into a real JS Date (UTC midnight, see excelSerialToDate() above) —
+// this just turns that into a plain 'YYYY-MM-DD' string for storage, with a tolerant fallback
+// for a column that for whatever reason isn't styled as a date in the source file (a plain
+// string Pimsy exported as text rather than a real date cell).
+function olDateToISO(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
+  const s = String(v).trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
 function olParseDemographics(rows) {
   const header = rows[0] || [];
   const idx = {};
@@ -6284,10 +6315,12 @@ function olParseDemographics(rows) {
   if (cClientNum==null || cDiv==null || cRef==null || cActive==null) {
     throw new Error('Expected columns not found (Client Number / Default Division / Referral Source / Active) — is this the "Clients by Demographic" export?');
   }
-  const progs = {}; // pk -> { activeClients:Set, totalClients:Set }
-  const pGet = k => { if(!progs[k]) progs[k] = { activeClients:new Set(), totalClients:new Set() }; return progs[k]; };
+  const cAdmission = olFindDateCol(idx, OL_ADMISSION_HEADER_CANDIDATES);
+  const cDischarge = olFindDateCol(idx, OL_DISCHARGE_HEADER_CANDIDATES);
+  const progs = {}; // pk -> { activeClients:Set, totalClients:Set, dates:{clientNum:{admission,discharge}} }
+  const pGet = k => { if(!progs[k]) progs[k] = { activeClients:new Set(), totalClients:new Set(), dates:{} }; return progs[k]; };
   const unmapped = new Set();
-  let totalRows = 0, activeRows = 0;
+  let totalRows = 0, activeRows = 0, admissionDatesFound = 0, dischargeDatesFound = 0;
   for (let r=1; r<rows.length; r++) {
     const row = rows[r]; if (!row) continue;
     const clientNum = String((row[cClientNum]!=null?row[cClientNum]:'')||'').trim();
@@ -6303,8 +6336,21 @@ function olParseDemographics(rows) {
     const p = pGet(pk);
     p.totalClients.add(clientNum);
     if (isActive) { p.activeClients.add(clientNum); activeRows++; }
+    if (cAdmission != null || cDischarge != null) {
+      const admission = cAdmission != null ? olDateToISO(row[cAdmission]) : null;
+      const discharge = cDischarge != null ? olDateToISO(row[cDischarge]) : null;
+      if (admission || discharge) {
+        p.dates[clientNum] = { admission, discharge };
+        if (admission) admissionDatesFound++;
+        if (discharge) dischargeDatesFound++;
+      }
+    }
   }
-  return { progs, totalRows, activeRows, unmapped:[...unmapped] };
+  return {
+    progs, totalRows, activeRows, unmapped:[...unmapped],
+    admissionColumnFound: cAdmission != null, dischargeColumnFound: cDischarge != null,
+    admissionDatesFound, dischargeDatesFound,
+  };
 }
 
 // Safe to re-run: wholesale-overwrites clientRosterCurrent[pk] on every upload — this file is a
@@ -6322,6 +6368,10 @@ async function olMergeDemographicsIntoProgramLedger(parsed) {
       clients: [...p.activeClients],
       totalEverAssigned: p.totalClients.size,
       uploadedAt: new Date().toISOString(),
+      // Per-client {admission, discharge} ISO date strings, only for clients where at least one
+      // was found — see olParseDemographics() above. Not consumed by any live tile yet; this is
+      // the capture step a future retention/tenure view would build on.
+      clientDates: p.dates || {},
     };
   });
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
