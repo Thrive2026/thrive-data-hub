@@ -5082,6 +5082,14 @@ function sliqReadScreenersWorkbook(buf){
 
 const SLIQ_IN_SCOPE_AUDITS = new Set(['Thrive Screener', 'Thrive Screener 2.0']);
 const SLIQ_INCOMPLETE_ROW_THRESHOLD = 10; // matches the validated backfill/mapping-plan rule
+// T-C-29984 is a confirmed test client (not a real Thrive client) — 51 of its rows were
+// deliberately deleted during the original SLI historical backfill's 9/21/26 cleanup for exactly
+// this reason. Because this ongoing bridge re-reads the full all-time Screeners export on every
+// upload, that test client's rows would otherwise keep silently reappearing in sli_assessments on
+// every future upload. Excluded by client number here, permanently, so it never gets written
+// (or counted in the preview) again. Add any other confirmed test/non-client numbers to this set
+// if one turns up the same way.
+const SLIQ_EXCLUDED_TEST_CLIENTS = new Set(['T-C-29984']);
 
 function sliqHeaderIndex(headerRow){
   const idx={};
@@ -5130,6 +5138,7 @@ function sliqParseScreenersWorkbook(sheetResult, fileName){
     if(!SLIQ_IN_SCOPE_AUDITS.has(audit)){ skippedOtherAudit++; continue; }
     const clientNum = String((row[cClient]!=null?row[cClient]:'')||'').trim();
     if(!clientNum) continue;
+    if(SLIQ_EXCLUDED_TEST_CLIENTS.has(clientNum)) continue;
     const fromRaw = row[cFrom];
     const fromISO = (typeof fromRaw==='string' && fromRaw) ? fromRaw : null;
     if(!fromISO) continue; // no session timestamp — can't group this row to anything
