@@ -2884,7 +2884,7 @@ function modH(){
     </div>
     <div style="background:#eef2fb;border:1px solid #c3d0ef;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🧠 SLI Screeners <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Ongoing · feeds sli_assessments</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the same Pimsy Screeners export used for the historical backfill (.xlsx, one row per client/session/question — "Thrive Screener" / "Thrive Screener 2.0" audits). Re-derives every score through the real, shared scoring engine and writes new sessions into <code>sli_assessments</code> — the same table every live screener metric ecosystem-wide reads from. Safe to re-upload the full all-time export every time: sessions already on file (matched by client + exact session date) are automatically skipped, never duplicated. Other audit types in the file (Client Automated Measures, BARC-10, EUROHIS-QOL, etc.) are not SLI 2.0 and are left out, same as the historical backfill.</div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the same Pimsy Screeners export used for the historical backfill (.xlsx, one row per client/session/question — "Thrive Screener" / "Thrive Screener 2.0" audits). Re-derives every score through the real, shared scoring engine and writes new sessions into <code>sli_assessments</code> — the same table every live screener metric ecosystem-wide reads from. Safe to re-upload the full all-time export every time: sessions already on file (matched by client + exact session date) are automatically skipped, never duplicated. Other audit types in the file (Client Automated Measures, BARC-10, EUROHIS-QOL, etc.) are not SLI 2.0 and are left out, same as the historical backfill. <strong>Requires edit mode unlocked</strong> (top of Roster tab) before you can confirm an import — <code>sli_assessments</code> only accepts writes from a real logged-in staff session, not the page's public key.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileSliScreeners(this)" style="font-size:12px;font-family:inherit">
       ${M.prevSliScreeners?(M.prevSliScreeners.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevSliScreeners.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevSliScreeners=null;H.om('data');">OK</button></div></div>`
         :M.prevSliScreeners.loading?`<div style="font-size:12px;color:#3e4a78;margin-top:8px">Reading and scoring — this file is large, give it a moment…</div>`
@@ -7865,6 +7865,14 @@ Object.assign(H, {
   _sliCommitChain: Promise.resolve(),
   commitSliScreeners(){
     if(!M.prevSliScreeners || M.prevSliScreeners.error || M.prevSliScreeners.loading || !M.prevSliScreeners.scoredCount) return;
+    // FIX (10/1): sli_assessments' RLS policies require a real authenticated
+    // staff session (auth.role()='authenticated'), not just the page's public
+    // anon key — this table drives authorized service hours, so it's
+    // deliberately locked down tighter than most of this app's other tables.
+    // Writes below go through dsSb (the real Supabase Auth client, same one
+    // roster editing uses), so this gate mirrors every other editLocked()
+    // guard in this file rather than inventing a new pattern.
+    if(editLocked()){ showSaveError('SLI Screeners import requires edit mode unlocked first (top of Roster tab) — this writes to sli_assessments, a clinical/billing-sensitive table, so it only runs under your logged-in staff session, not the page\'s public key.'); return; }
     const parsed = M.prevSliScreeners;
     M.prevSliScreeners = {committing:true, total: parsed.scoredCount};
     render(); modH();
@@ -7882,14 +7890,34 @@ Object.assign(H, {
 
     // 1. Pull each in-scope client's existing sli_assessments rows (id,
     // assessment_date, is_current) — needed for dedup, assessment_type
-    // sequencing, and is_current supersede. Chunked to keep the PostgREST
-    // `in.()` filter URL a reasonable length.
+    // sequencing, and is_current supersede. Chunked to keep the `.in()`
+    // filter list a reasonable size per request.
+    //
+    // FIX (10/1): uses dsSb (the real Supabase Auth client — same one roster
+    // editing already uses) instead of the plain db.* helper. sli_assessments'
+    // RLS policies require auth.role()='authenticated', and db.* always sends
+    // the static public anon key, which Postgres sees as role 'anon' no
+    // matter who's logged into the page — every db.get/insert/update call
+    // against this table was silently rejected (401, "new row violates
+    // row-level security policy"), which is why the first real run reported
+    // "0 already on file" / "0 imported" instead of throwing anything
+    // visible. dsSb automatically attaches the logged-in staff member's real
+    // session token, which satisfies the policy correctly — the right fix,
+    // rather than loosening this table's RLS to the public key.
+    //
+    // A failed lookup here is NOT silently treated as "this client has no
+    // existing rows" — that would make every session in the file look brand
+    // new and risk mass-duplicate inserts. It throws instead, which the
+    // caller's .catch() turns into a clear error rather than a silent wrong
+    // answer.
     const existingByClient = {};
     const CHUNK = 40;
     for(let i=0;i<clientNums.length;i+=CHUNK){
       const chunk = clientNums.slice(i,i+CHUNK);
-      const filterList = chunk.map(c=>encodeURIComponent(c)).join(',');
-      const rows = await db.get('sli_assessments', `client_number=in.(${filterList})&select=id,client_number,assessment_date,is_current`);
+      const {data:rows, error} = await dsSb.from('sli_assessments')
+        .select('id,client_number,assessment_date,is_current')
+        .in('client_number', chunk);
+      if(error){ throw new Error('Could not read existing sli_assessments rows (needed for dedup) — aborting rather than risk duplicate inserts: '+error.message); }
       (rows||[]).forEach(r=>{ (existingByClient[r.client_number] = existingByClient[r.client_number] || []).push(r); });
     }
 
@@ -7951,9 +7979,9 @@ Object.assign(H, {
         director_review_required: s.directorReviewRequired,
         is_current: false,
       };
-      const res = await db.insert('sli_assessments', row);
+      const {data:res, error:insErr} = await dsSb.from('sli_assessments').insert(row).select();
       const newId = res && res[0] && res[0].id;
-      if(newId==null){ console.warn('[commitSliScreeners] insert did not return an id, skipping supersede chain for', x.session.client_number, x.session.from_date); continue; }
+      if(newId==null){ console.warn('[commitSliScreeners] insert failed, skipping supersede chain for', x.session.client_number, x.session.from_date, insErr); continue; }
       inserted.push({ id: newId, client_number: x.session.client_number, date: x.session.from_date });
     }
 
@@ -7970,14 +7998,14 @@ Object.assign(H, {
       let current = existingCurrentRow ? { id: existingCurrentRow.id, date: existingCurrentRow.assessment_date } : null;
       for(const nr of newRows){
         if(!current || nr.date > current.date){
-          if(current) await db.update('sli_assessments', current.id, { is_current: false, superseded_by: nr.id });
-          await db.update('sli_assessments', nr.id, { is_current: true });
+          if(current){ const {error:e1} = await dsSb.from('sli_assessments').update({ is_current: false, superseded_by: nr.id }).eq('id', current.id); if(e1) console.warn('[commitSliScreeners] supersede update failed for', current.id, e1); }
+          const {error:e2} = await dsSb.from('sli_assessments').update({ is_current: true }).eq('id', nr.id); if(e2) console.warn('[commitSliScreeners] is_current update failed for', nr.id, e2);
           current = nr;
         } else {
           // Backdated relative to what's already current (e.g. an out-of-
           // order re-upload) — never made current, and recorded as already
           // superseded by whatever is/was current at the time it's imported.
-          await db.update('sli_assessments', nr.id, { is_current: false, superseded_by: current.id });
+          const {error:e3} = await dsSb.from('sli_assessments').update({ is_current: false, superseded_by: current.id }).eq('id', nr.id); if(e3) console.warn('[commitSliScreeners] backdate supersede update failed for', nr.id, e3);
         }
       }
     }
