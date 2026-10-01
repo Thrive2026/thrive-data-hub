@@ -1941,7 +1941,8 @@ const DATA_CATALOG = [
   {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7},
   {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
   {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
-  {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes + Client Sets)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26; client sets added 9/16/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup; Active Caseload/Total Admitted for Community + CCJ, live as of 9/16/26)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed on the Outcomes Dashboard side against live sli_assessments, joined to the client set this row provides. Outcomes Dashboard still needs its own separate Demographics upload for county/race/insurance/housing/employment breakdowns — no live equivalent exists anywhere yet.'},
+  {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes + Client Sets)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26; client sets added 9/16/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup; Active Caseload/Total Admitted for Community + CCJ, live as of 9/16/26)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed on the Outcomes Dashboard side against live sli_assessments, joined to the client set this row provides.'},
+  {registryKey:'client_roster_demo', label:'Client Roster / Demographics ("Clients by Demographic" export)', supaKey:'program_ledger (clientRosterCurrent)', uploadedVia:'Data & Staff Hub', consumers:'Outcomes Dashboard (widens the client population behind Screener Rate/PHQ-9/GAD-7/Risk/ASAM Improved + Contracted Outcomes status, unioned with Pimsy Notes’ own client sets)', cadenceDays:7, note:'Added 10/1/26, closing the gap the program_hub_ledger row above used to flag ("no live Demographics equivalent exists"). All-time, one-row-per-client file — Active flag + Default Division/Referral Source decide program membership independent of whether a service note was logged that specific week, unlike clientSetsCurrent.'},
   {registryKey:'supervision_tracking', label:'Supervision Tracking Workbook', supaKey:'sup_import', uploadedVia:'Data & Staff Hub', consumers:'Data & Staff Hub (credential compliance)', cadenceDays:30},
   {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
   {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
@@ -2703,6 +2704,7 @@ function modH(){
     const freshnessBar=`<div style="font-size:11.5px;color:#3e4a78;background:#fff;border:1px solid #e6dfd2;border-radius:6px;padding:9px 13px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:6px 18px">
       <span>🕐 <strong>Productivity (Hours/Caseload):</strong> ${fmtFresh(freshCase||freshHours)}</span>
       <span><strong>Pimsy Notes (Linkage + Courts/Jail):</strong> data through ${dtFor('pimsy_notes')} <span style="color:#8089a8">(uploaded ${fmtFreshTs(S.linkageData&&S.linkageData.importedAt)})</span></span>
+      <span><strong>Client Roster/Demographics:</strong> data through ${dtFor('client_roster_demo')}</span>
       <span><strong>Hospital Outcomes:</strong> data through ${dtFor('hospital_outcomes')}</span>
       <span><strong>Supervision:</strong> latest month on file ${dtFor('supervision_tracking')}</span>
     </div>`;
@@ -2758,6 +2760,23 @@ function modH(){
           </div>`;}).join(''):(ct.parseError?`<div style="color:#a52d6d">${xe(ct.parseError)}</div>`:'<div style="color:#8089a8">No Courts/Jail rows found in this file.</div>')}
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevNotes=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitNotes()">Confirm Import (${lkMonths.length + ctMonths.length} month-records)</button></div>
+      </div>`;
+      })()):''}
+    </div>
+    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🧾 Client Roster / Demographics <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">All-time export · fixes Notes-week gaps in live screener metrics</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop Pimsy's "Clients by Demographic" export (.xlsx) here. It's a full all-time, one-row-per-client roster — Outcomes Dashboard uses its Active flag plus Default Division/Referral Source to know which program a client belongs to <strong>without needing a service note logged that same week</strong>, using the same mapping rules as Pimsy Notes above. This never replaces Active Caseload/Sessions/Revenue (those stay Notes-only — real billing activity) — it only widens the client list used for Screener Rate, PHQ-9/GAD-7/Risk/ASAM Improved, and the Contracted Outcomes statuses tied to them.</div>
+      <input type="file" accept=".xlsx,.xls" onchange="H.slotFileDemo(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevDemo?(M.prevDemo.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevDemo.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevDemo=null;H.om('data');">OK</button></div></div>`:(()=>{
+        const parsed = M.prevDemo.parsed;
+        const pkRows = Object.entries(parsed.progs).sort(([,a],[,b])=>b.activeClients.size-a.activeClients.size);
+        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Client Roster (${parsed.activeRows} active of ${parsed.totalRows} total rows read)</div>
+        <div style="font-size:12px;color:#3e4a78;line-height:1.7;max-height:200px;overflow:auto">
+          ${pkRows.length?pkRows.map(([pk,p])=>`<div style="padding:3px 0;border-bottom:1px solid #f0ece3"><strong>${xe(pk)}</strong> — ${p.activeClients.size} active (${p.totalClients.size} ever assigned)</div>`).join(''):'<div style="color:#8089a8">No rows matched a known program.</div>'}
+        </div>
+        ${parsed.unmapped.length?`<div style="font-size:11px;color:#8089a8;margin-top:6px">Unmapped divisions seen: ${parsed.unmapped.slice(0,10).map(xe).join(', ')}${parsed.unmapped.length>10?'…':''}</div>`:''}
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevDemo=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitDemo()">Confirm Import</button></div>
       </div>`;
       })()):''}
     </div>
@@ -6233,6 +6252,82 @@ async function olMergeNotesIntoProgramLedger(objRows){
   return { ok: !!saved, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
 }
 
+// CLIENT ROSTER / DEMOGRAPHICS BRIDGE (10/1/26, per Brandon's "Clients by Demographic" export —
+// closes the exact gap already flagged in the Data Catalog's program_hub_ledger note: "Outcomes
+// Dashboard still needs its own separate Demographics upload ... no live equivalent exists
+// anywhere yet"). Unlike olParseNotes() above, this reads a full all-time, one-row-per-client
+// roster (Pimsy's "Clients by Demographic" report), not a rolling window of service notes. Its
+// Default Division / Referral Source columns are mapped through the SAME OL_PIMSY_DIV_MAP /
+// OL_PIMSY_REF_MAP used for Notes, with the same referral-source-first priority, so a client
+// lands in the same program key either way those two files are uploaded.
+//
+// The real problem this fixes (confirmed 10/1/26 against real client data): clientSetsCurrent
+// above only knows about a client if they have an actual billable service note in whatever
+// week's Notes export happened to get run — a client with a real, current screener on file but
+// no note logged that particular week silently disappears from every program's live metrics,
+// not because their data is bad but because Notes is the ONLY source the dashboard has for
+// "which program is this client in" (the Screeners export itself carries no Division/Referral
+// Source at all — see sliqParseScreenersWorkbook()'s columns). This roster's own Active flag
+// doesn't depend on note timing, so Outcomes Dashboard unions it against clientSetsCurrent
+// (never replaces it) specifically for screener-based live metrics — Screener Rate, PHQ-9/
+// GAD-7/Risk/ASAM Improved, and any Contracted Outcome status gated on those. Total Admitted /
+// Active Caseload / Sessions / Revenue stay Notes-only on purpose; those are real billing-
+// activity measures and should keep meaning that.
+function olParseDemographics(rows) {
+  const header = rows[0] || [];
+  const idx = {};
+  header.forEach((h,i) => { idx[String(h||'').trim().toLowerCase()] = i; });
+  const cClientNum = idx['client number'];
+  const cDiv = idx['default division'];
+  const cRef = idx['referral source'];
+  const cActive = idx['active'];
+  if (cClientNum==null || cDiv==null || cRef==null || cActive==null) {
+    throw new Error('Expected columns not found (Client Number / Default Division / Referral Source / Active) — is this the "Clients by Demographic" export?');
+  }
+  const progs = {}; // pk -> { activeClients:Set, totalClients:Set }
+  const pGet = k => { if(!progs[k]) progs[k] = { activeClients:new Set(), totalClients:new Set() }; return progs[k]; };
+  const unmapped = new Set();
+  let totalRows = 0, activeRows = 0;
+  for (let r=1; r<rows.length; r++) {
+    const row = rows[r]; if (!row) continue;
+    const clientNum = String((row[cClientNum]!=null?row[cClientNum]:'')||'').trim();
+    if (!clientNum) continue;
+    totalRows++;
+    const div = String(row[cDiv]||'').trim();
+    const refSrc = String(row[cRef]||'').trim();
+    // Same priority as olParseNotes(): Referral Source checked first, Division as fallback.
+    const pk = OL_PIMSY_REF_MAP[refSrc] || OL_PIMSY_DIV_MAP[div];
+    if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
+    const active = row[cActive];
+    const isActive = active===true || active===1 || String(active).toLowerCase()==='true';
+    const p = pGet(pk);
+    p.totalClients.add(clientNum);
+    if (isActive) { p.activeClients.add(clientNum); activeRows++; }
+  }
+  return { progs, totalRows, activeRows, unmapped:[...unmapped] };
+}
+
+// Safe to re-run: wholesale-overwrites clientRosterCurrent[pk] on every upload — this file is a
+// fresh full all-time snapshot every time, not a delta, so overwriting (not merging) is correct
+// here, same convention as clientSetsCurrent's own "most recent upload wins" rule above.
+async function olMergeDemographicsIntoProgramLedger(parsed) {
+  const rows = await db.get('appdata', 'key=eq.program_ledger');
+  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}, clientSetsCurrent:{}};
+  if (rows && rows[0] && rows[0].value) {
+    try { ledger = JSON.parse(rows[0].value); } catch(e) {}
+  }
+  if (!ledger.clientRosterCurrent) ledger.clientRosterCurrent = {};
+  Object.entries(parsed.progs).forEach(([pk, p]) => {
+    ledger.clientRosterCurrent[pk] = {
+      clients: [...p.activeClients],
+      totalEverAssigned: p.totalClients.size,
+      uploadedAt: new Date().toISOString(),
+    };
+  });
+  const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
+  return { ok: !!saved, programsTouched: Object.keys(parsed.progs).length };
+}
+
 const H={
   nav(v,m){S.view=v;if(m)S.selMgr=m;M.type=null;sv('view',v);sv('selMgr',S.selMgr);render();},
   setR(role){S.role=role;sv('role',role);const m=document.getElementById('rm');if(m)m.style.display='none';this.nav('settings');},
@@ -7359,6 +7454,52 @@ async delSRow(enc){
     M.prevNotes = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported Linkage (${lkMonthCount-lkSkipped} month${lkMonthCount-lkSkipped!==1?'s':''}${lkSkipped?`, ${lkSkipped} skipped — already on file`:''}) + ${courtsN} Courts/Jail record${courtsN!==1?'s':''} across ${courtsMonthCount} month${courtsMonthCount!==1?'s':''}${ctSkipped?` (${ctSkipped} skipped)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
+  },
+  slotFileDemo(inp){
+    // Pimsy's "Clients by Demographic" export — see olParseDemographics()'s comment for exactly
+    // why this exists: a full all-time, one-row-per-client roster whose Active flag doesn't
+    // depend on a note having been logged that particular week, unlike clientSetsCurrent above.
+    const f=inp.files[0]; if(!f) return;
+    S._lastFile=f.name;
+    if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx file directly.'); return; }
+    const r=new FileReader();
+    r.onload=async e=>{
+      try{
+        const candidates = await parseXlsxNamedSheets(e.target.result, [/demographic/i,/^sheet\s*1$/i,/clients/i]);
+        let demoRows = null;
+        for(const [name,rows] of Object.entries(candidates)){
+          if(!rows || !rows.length) continue;
+          for(let hi=0; hi<Math.min(5,rows.length); hi++){
+            const hdr = (rows[hi]||[]).map(h=>String(h||'').trim().toLowerCase());
+            if(hdr.includes('client number') && hdr.includes('default division') && hdr.includes('referral source') && hdr.includes('active')){
+              demoRows = rows.slice(hi);
+              break;
+            }
+          }
+          if(demoRows) break;
+        }
+        if(!demoRows) throw new Error('Expected columns not found (Client Number / Default Division / Referral Source / Active) — is this the "Clients by Demographic" export?');
+        M.prevDemo = { parsed: olParseDemographics(demoRows) };
+      }catch(err){ M.prevDemo = {error: err.message}; }
+      modH();
+    };
+    r.readAsArrayBuffer(f);
+  },
+  commitDemo(){
+    const p = M.prevDemo; if(!p || p.error) return;
+    olMergeDemographicsIntoProgramLedger(p.parsed).then(res=>{
+      if(res.ok){
+        recordImport('client_roster_demo', {row_count:p.parsed.activeRows, data_through:new Date().toISOString()});
+        M.prevDemo = null;
+        render();
+        const t=document.createElement('div');t.textContent=`✓ Imported client roster — ${p.parsed.activeRows} active clients across ${res.programsTouched} program${res.programsTouched!==1?'s':''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
+      }else{
+        showSaveError('Could not save the client roster to Supabase — try again.');
+      }
+    }).catch(err=>{
+      console.error('[olMergeDemographicsIntoProgramLedger]', err);
+      showSaveError('Importing the client roster hit an error — see console.');
+    });
   },
   // Same serialized-write pattern as _plCommitChain/_klipCommitChain — see the comment on
   // _plCommitChain above for the exact race this prevents.
