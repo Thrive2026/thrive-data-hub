@@ -6058,6 +6058,29 @@ const OL_PIMSY_REF_MAP = {
   'Warren County START':'archived','W/C You-Turn Recovery Docket':'archived',
   "W/C SUCCESS/MH Docket ":'archived',
 };
+// NORMALIZATION FIX (10/2/26) — Brandon's real "Unmapped divisions seen" preview showed
+// "Cuyahoga County Jail", "SUD Community Services", and "MH Community Services" as unmapped
+// even though each one is an exact, correctly-spelled key in OL_PIMSY_DIV_MAP above. Both lookup
+// sites already .trim() the raw cell text, which only strips LEADING/TRAILING whitespace — it
+// does nothing for an internal run of whitespace (a doubled space, a tab) or a non-breaking
+// space (U+00A0) standing in for a normal one, both common artifacts of Excel/Pimsy exports,
+// and either would make an otherwise-identical string fail this dictionary's exact,
+// case-sensitive match. Rather than guess at the one invisible character and bolt on another
+// one-off duplicate key (the way 'MH Community Linkage ' already had to be special-cased for a
+// trailing space), this collapses ANY run of whitespace — regular, tab, or non-breaking — down
+// to a single regular space, on both the incoming text and the dictionaries' own keys, before
+// matching. That holds regardless of which exact character is actually in the export, and means
+// no future duplicate-key workaround is needed for this reason again.
+function olNormDivText(s) {
+  return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+}
+function olNormalizeMap(map) {
+  const out = {};
+  Object.keys(map).forEach(k => { out[olNormDivText(k)] = map[k]; });
+  return out;
+}
+const OL_PIMSY_DIV_MAP_N = olNormalizeMap(OL_PIMSY_DIV_MAP);
+const OL_PIMSY_REF_MAP_N = olNormalizeMap(OL_PIMSY_REF_MAP);
 function olMLabel(d) {
   if (!d) return null;
   const dt = d instanceof Date ? d : new Date(d);
@@ -6143,7 +6166,7 @@ function olParseNotes(rows, trendMonths) {
     const refSrc   = (r['Referral Source'] || '').trim();
     const clientNum= r['Client #'];
     const isCTP = CTP_STAFF.includes(performer) || noteType === 'CTP Care Coordination';
-    let pk = (OL_PIMSY_REF_MAP[refSrc] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP[div]));
+    let pk = (OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP_N[olNormDivText(div)]));
     if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
     const p = pGet(pk);
     const svcD = r['Service Date'];
@@ -6329,7 +6352,7 @@ function olParseDemographics(rows) {
     const div = String(row[cDiv]||'').trim();
     const refSrc = String(row[cRef]||'').trim();
     // Same priority as olParseNotes(): Referral Source checked first, Division as fallback.
-    const pk = OL_PIMSY_REF_MAP[refSrc] || OL_PIMSY_DIV_MAP[div];
+    const pk = OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)] || OL_PIMSY_DIV_MAP_N[olNormDivText(div)];
     if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
     const active = row[cActive];
     const isActive = active===true || active===1 || String(active).toLowerCase()==='true';
