@@ -2929,6 +2929,7 @@ function modH(){
         <div style="font-size:12px;color:#3e4a78;line-height:1.7">
           <div>✅ <strong>${M.prevHosp.activePRS}</strong> providers · <strong>${M.prevHosp.totalEncounters}</strong> encounters · period ${xe(M.prevHosp.period)}</div>
           <div>Engaged: ${M.prevHosp.totalEngaged} · Arrived at destination: ${M.prevHosp.totalArrived}${M.prevHosp.totalLinkedThriveCPS!=null?' · Linked to Thrive Peer Support: '+M.prevHosp.totalLinkedThriveCPS:''} · Did not engage: ${M.prevHosp.totalDidNot}</div>
+          ${(M.prevHosp.noOutcome||M.prevHosp.unrecognizedCount)?`<div style="color:#92400E;font-size:11px">⚠️ Data check: ${M.prevHosp.noOutcome||0} row(s) with no outcome (counted as not engaged) · ${M.prevHosp.unrecognizedCount||0} with an unrecognized status${HOSP_STRICT_ENGAGED?' (not counted as engaged)':' (counted as engaged)'}${(M.prevHosp.unrecognizedStatuses||[]).length?': '+M.prevHosp.unrecognizedStatuses.slice(0,10).map(x=>'"'+xe(x)+'"').join(', '):''}</div>`:''}
           ${M.prevHosp.excludedNotOnRoster?`<div style="color:#8089a8;font-size:11px">⚠️ ${M.prevHosp.excludedNotOnRoster} row(s) skipped — not on Hospital roster: ${M.prevHosp.excludedNames.slice(0,10).map(xe).join(', ')}${M.prevHosp.excludedNames.length>10?'…':''}</div>`:''}
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevHosp=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitHosp()">Confirm Import</button></div>
@@ -3755,6 +3756,12 @@ function hospYN(v){
   if(s==='NO'||s==='N') return false;
   return null;
 }
+// Legacy tracker format: outcome statuses confirmed as "engaged but not linked". Add exact
+// status values (lowercase) as they're confirmed; anything unmatched is flagged on import.
+var HOSP_ENGAGED_OTHER_STATUSES = [];
+// false = unrecognized statuses still count as engaged (prior behavior) but are flagged.
+// true  = only recognized statuses count as engaged.
+var HOSP_STRICT_ENGAGED = false;
 function aggregateHospitalOutcomes(rows, filename){
   const hdr = rows[0].map(h=>String(h||'').toLowerCase().trim());
   const col=(...patterns)=>{
@@ -3810,6 +3817,8 @@ function aggregateHospitalOutcomes(rows, filename){
   const byPRS={}, siteMap={}, txMap={};
   let totalEncounters=0,totalEngaged=0,totalArrived=0,totalDidNot=0,totalRows=0;
   let excludedNotOnRoster=0; const excludedNames=new Set();
+  // Data check (legacy tracker format only): blank outcomes and statuses the parser doesn't recognize.
+  let noOutcome=0, unrecognizedCount=0; const unrecognizedStatuses=new Set();
   const rbn = hospRosterByNorm();
 
   // Rich, roster-UNfiltered accumulators — every row counts here, no roster exclusion. This
@@ -3869,9 +3878,12 @@ function aggregateHospitalOutcomes(rows, filename){
       arrivedFlag  = arrivedVal==='YES';
       didNot  = !engaged;
     } else {
-      engaged = outcome && !/peer did not engage/i.test(outcome);
-      arrivedFlag  = /linked with prs|in treatment|transferred|presumptive/i.test(outcome);
       didNot  = /peer did not engage/i.test(outcome);
+      arrivedFlag  = /linked with prs|in treatment|transferred|presumptive/i.test(outcome);
+      const otherKnown = HOSP_ENGAGED_OTHER_STATUSES.includes(outcome.toLowerCase());
+      if(!outcome){ noOutcome++; }
+      else if(!didNot && !arrivedFlag && !otherKnown){ unrecognizedCount++; unrecognizedStatuses.add(outcome); }
+      engaged = !!outcome && !didNot && (HOSP_STRICT_ENGAGED ? (arrivedFlag || otherKnown) : true);
     }
     totalEncounters++; totalRows++;
     if(engaged) totalEngaged++;
@@ -3968,6 +3980,7 @@ function aggregateHospitalOutcomes(rows, filename){
     byPRS, sites:Object.values(siteMap).sort((a,b)=>b.encounters-a.encounters),
     txCenters:Object.entries(txMap).sort((a,b)=>b[1]-a[1]),
     excludedNotOnRoster, excludedNames:Array.from(excludedNames),
+    noOutcome, unrecognizedCount, unrecognizedStatuses:Array.from(unrecognizedStatuses),
     importedAt:new Date().toISOString(),
     // Always present, every format — see the FIX comment above generalSiteCount's declaration.
     // The rich branch below overrides these three with its richer per-status/per-site breakdown
