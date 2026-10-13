@@ -719,16 +719,28 @@ function resolveStaffByAlias(rawName){
   return S.staff.find(s=>s.id===id) || null;
 }
 
+// FIX (10/12, Sarah's "the people I added keep disappearing"): this used to WRITE the whole
+// roster back to Supabase on page load and on every "Refresh Staffing Data" click, any time the
+// copy it just read differed from what it computed — and it always differed for anyone added
+// through Add Staff, because the in-memory backfill below adds empty gender/city/county/zip/
+// program fields those rows don't have. That write used a snapshot read seconds earlier (as part
+// of one very large all-appdata request), so any add or manager move saved by another tab or hub
+// in between was silently overwritten. Loading now NEVER writes the roster: the backfill is
+// display-only, and the roster is read on its own small request so a slow/failed bulk load can't
+// leave you looking at an old cached roster without knowing it. Returns true/false = roster
+// actually came from Supabase, so the Refresh button can tell the truth.
+let ROSTER_STALE=false;
 async function syncFromSupabase(){
-  if(SB_URL.includes('YOUR_PROJECT')||SB_KEY.includes('YOUR_ANON'))return;
+  if(SB_URL.includes('YOUR_PROJECT')||SB_KEY.includes('YOUR_ANON'))return false;
+  let rosterOk=false;
+  const staffRows=await db.get('appdata','key=eq.staff&select=key,value');
   const allAppdata=await db.get('appdata');
-  if(allAppdata){
-    const byKey={};allAppdata.forEach(r=>{byKey[r.key]=r.value;});
+  if(staffRows||allAppdata){
+    const byKey={};(allAppdata||[]).forEach(r=>{byKey[r.key]=r.value;});
+    if(staffRows&&staffRows[0])byKey.staff=staffRows[0].value; // the dedicated read wins — it's the freshest
     const parse=(k)=>{try{return byKey[k]?JSON.parse(byKey[k]):null;}catch(e){return null;}};
    const staff=parse('staff');if(staff&&Array.isArray(staff)&&staff.length>0){
-      // Merge by ID rather than overwrite — a stale Supabase snapshot saved before someone
-      // was added to the default roster (SDEF) would otherwise wipe them back out on every
-      // load, even though initStaff() had just correctly added them locally.
+      rosterOk=true;
       const seedDefaults=(s)=>{
         const seed=PROVIDER_MAP_DATA[s.id]||{};
         return {
@@ -739,54 +751,59 @@ async function syncFromSupabase(){
           program:(s.program!=null&&s.program!=='')?s.program:(seed.program||''),
         };
       };
-      const backfilled=staff.map(s=>({...s,...seedDefaults(s)}));
-      const savedIds=new Set(staff.map(s=>s.id));
-      // Crisis Center rows are excluded from the re-add: the Crisis Center hub owns them, so a
-      // person it deleted must not be resurrected from this file's default roster.
-      const missingFromDefault=SDEF.map(s=>({...s,status:s.status||'Active',...seedDefaults(s)})).filter(s=>!savedIds.has(s.id)&&!isCCOwned(s));
-      S.staff = missingFromDefault.length ? [...backfilled, ...missingFromDefault] : backfilled;
-      // Only write back when this load actually changed something. Writing the whole roster on
-      // every page open was a standing last-write-wins risk against saves from the other hubs.
-      if(JSON.stringify(S.staff)!==JSON.stringify(staff)) sv('s',S.staff);
-      else { try{localStorage.setItem('ths_s',JSON.stringify(S.staff));}catch(e){} }
+      // Display-only backfill. Supabase is the source of truth for who is on the roster — the old
+      // "re-add anyone in SDEF who's missing" step is gone too: it brought back people who had been
+      // deliberately Deleted, and it was one of the triggers for the write-back described above.
+      S.staff=staff.map(s=>({...s,...seedDefaults(s)}));
+      try{localStorage.setItem('ths_s',JSON.stringify(staff));}catch(e){}
     }
-    const pd=parse('pd');if(pd&&Object.keys(pd).length>0){S.pd=pd;sv('p',S.pd);}
-    const up=parse('uploads');if(up){Object.entries(up).forEach(([p,v])=>{S.up[p]={...(S.up[p]||{}),...v};});sv('up',S.up);}
-    const supOv=parse('sup_overrides');if(supOv){S.supOverrides={...S.supOverrides,...supOv};sv('supov',S.supOverrides);}
-    const pmOv=parse('pm_overrides');if(pmOv){S.pmOverrides={...S.pmOverrides,...pmOv};sv('pmov',S.pmOverrides);}
-    const upAt=parse('uploads_at');if(upAt){S.upAt={...S.upAt,...upAt};sv('upAt',S.upAt);}
-    const impreg=parse('import_registry');if(impreg){S.impreg={...S.impreg,...impreg};sv('impreg',S.impreg);}
-    const ren=parse('renewals');if(ren&&Array.isArray(ren)&&ren.length>0){S.renewals=cleanStaleLocationNotes(ren);sv('r',S.renewals);}
-    const supImp=parse('sup_import');if(supImp&&Object.keys(supImp).length>0){S.supImport=foldLegacyCredentials(foldSupAliases({...(S.supImport||{}),...supImp}));sv('supimp',S.supImport);}
-    const hospD=parse('hospital_data');if(hospD){S.hospData=hospD;sv('hospData',S.hospData);}
-    const linkData=parse('linkage_data');if(linkData){S.linkageData=linkData;sv('linkageData',S.linkageData);}
+    // FIX (10/12): everything below used to call sv(), which re-uploaded every dataset to
+    // Supabase on every page open — and several of them first MERGED this browser's old cached
+    // copy into the server's (uploads, sup_overrides, pm_overrides, uploads_at, import_registry,
+    // sup_import), which pushed stale or already-removed entries back over newer work. Loading is
+    // now read-only: the server copy replaces this browser's copy and is only cached locally.
+    // SV_SEEN records exactly what was loaded so sv() can detect conflicting edits later.
+    if(allAppdata){ Object.values(SHARED_KEYS).forEach(key=>{ if(key!=='staff') SV_SEEN[key]=(key in byKey&&byKey[key]!=null)?byKey[key]:null; }); }
+    if(staffRows){ SV_SEEN.staff=(staffRows[0]&&staffRows[0].value!=null)?staffRows[0].value:null; }
+    const pd=parse('pd');if(pd&&typeof pd==='object'){S.pd=pd;cacheLocal('p',S.pd);}
+    const up=parse('uploads');if(up){S.up=up;cacheLocal('up',S.up);}
+    const supOv=parse('sup_overrides');if(supOv){S.supOverrides=supOv;cacheLocal('supov',S.supOverrides);}
+    const pmOv=parse('pm_overrides');if(pmOv){S.pmOverrides=pmOv;cacheLocal('pmov',S.pmOverrides);}
+    const upAt=parse('uploads_at');if(upAt){S.upAt=upAt;cacheLocal('upAt',S.upAt);}
+    const impreg=parse('import_registry');if(impreg){S.impreg=impreg;cacheLocal('impreg',S.impreg);}
+    const ren=parse('renewals');if(Array.isArray(ren)){S.renewals=cleanStaleLocationNotes(ren);cacheLocal('r',S.renewals);}
+    const supImp=parse('sup_import');if(supImp&&typeof supImp==='object'){S.supImport=foldLegacyCredentials(foldSupAliases(supImp));cacheLocal('supimp',S.supImport);}
+    const hospD=parse('hospital_data');if(hospD){S.hospData=hospD;cacheLocal('hospData',S.hospData);}
+    const linkData=parse('linkage_data');if(linkData){S.linkageData=linkData;cacheLocal('linkageData',S.linkageData);}
     // linkage_history is the actual durable multi-month store — linkage_data above is just a
     // single latest-snapshot convenience copy, kept for backward compatibility. Same load
     // pattern as 'pd' above: fully replace S.linkageHistory with the server's copy, since the
     // server is authoritative here, then merge in whatever this session commits on top of it.
-    const linkHist=parse('linkage_history');if(linkHist&&Object.keys(linkHist).length>0){S.linkageHistory=linkHist;sv('linkageHistory',S.linkageHistory);}
+    const linkHist=parse('linkage_history');if(linkHist&&typeof linkHist==='object'){S.linkageHistory=linkHist;cacheLocal('linkageHistory',S.linkageHistory);}
     // Raw note pool — same "server is authoritative, merge session on top" pattern as history
     // above. This is what makes weekly delta uploads safe: it's the accumulated memory a new
     // upload gets merged into, rather than each upload starting from a blank slate.
-    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&Object.keys(linkRaw).length>0){S.linkageNotesRaw=linkRaw;sv('linkageNotesRaw',S.linkageNotesRaw);}
+    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;cacheLocal('linkageNotesRaw',S.linkageNotesRaw);}
   }
   const remoteTasks=await db.get('tasks');
   if(remoteTasks){
     const remoteIds=new Set(remoteTasks.map(t=>t.id));
     const localOnly=(S.tasks||[]).filter(t=>!remoteIds.has(t.id));
     S.tasks=[...remoteTasks.map(t=>({id:t.id,title:t.title,desc:t.description,notes:t.notes,assignedTo:t.assigned_to,assignedBy:t.assigned_by,priority:t.priority,dueDate:t.due_date,status:t.status,created:t.created})),...localOnly];
-    sv('t',S.tasks);
+    cacheLocal('t',S.tasks);
   }
   const remoteNotes=await db.get('notes');
   if(remoteNotes){
     const grouped={};remoteNotes.forEach(n=>{if(!grouped[n.staff_id])grouped[n.staff_id]=[];grouped[n.staff_id].push({text:n.text,author:n.author,date:n.created_at?.slice(0,10),id:n.id,ts:n.created_at});});
     Object.entries(grouped).forEach(([staffId,entries])=>{S.noteLogs[staffId]=entries;});
-    sv('nlogs',S.noteLogs);
+    cacheLocal('nlogs',S.noteLogs);
   }
   const remoteSup=await db.get('supervision');
-  if(remoteSup){const supMap={};remoteSup.forEach(s=>{supMap[s.key]=s.completed;});S.supOverrides={...(S.supOverrides||{}),...supMap};sv('supov',S.supOverrides);}
+  if(remoteSup){const supMap={};remoteSup.forEach(s=>{supMap[s.key]=s.completed;});S.supOverrides={...(S.supOverrides||{}),...supMap};cacheLocal('supov',S.supOverrides);}
   await loadStaffAliasMap(); // re-populate against the live roster now that S.staff may have changed
+  ROSTER_STALE=!rosterOk;
   render();
+  return rosterOk;
 }
 
 // One-time cleanup for renewal records imported before the parser fix — those records had
@@ -1019,26 +1036,68 @@ const RESOURCE_LINKS=[
 // await it and only report success once the write is verified to have actually landed. Existing
 // call sites that don't await it still work exactly as before — this is not a breaking change,
 // just an opt-in for callers that need to know the real result.
+//
+// FIX (10/12): conflict check on every shared save. Each shared key is one big blob, and every
+// save replaces the whole blob with this tab's copy — so a tab that had been open a while could
+// overwrite renewals, uploads, supervision checks, notes, etc. that someone else saved in the
+// meantime (the same last-write-wins problem that was wiping Sarah's staff adds). SV_SEEN holds
+// the exact server value this tab last loaded or saved for each key. Right before saving, sv()
+// re-reads the server copy; if someone else changed it since, it REFUSES to overwrite, keeps the
+// server data intact, and tells the user to refresh and redo the change. Saves to the same key
+// from this tab are queued one at a time so two quick clicks can't trip over each other.
+const SHARED_KEYS={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry'};
+const SV_SEEN={};   // appdata key -> raw server string last seen by this tab (null = row didn't exist)
+const SV_QUEUE={};  // appdata key -> promise chain, so saves to one key run in order
+const SV_LABEL={staff:'staff roster',pd:'productivity data',renewals:'renewals',tasks:'tasks',notes_log:'staff notes',sup_overrides:'supervision checkmarks',sup_import:'supervision import',pm_overrides:'Provider Match availability',uploads:'upload status',uploads_at:'upload dates',hospital_data:'hospital data',linkage_data:'linkage data',linkage_history:'linkage history',linkage_notes_raw:'linkage notes',import_registry:'Data Catalog upload log'};
+async function svServerValue(key){
+  const rows=await db.get('appdata','key=eq.'+encodeURIComponent(key)+'&select=value');
+  if(rows===null)return undefined;           // couldn't reach Supabase
+  return (rows[0]&&rows[0].value!=null)?rows[0].value:null;
+}
 async function sv(k,v){
   try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
-  const sharedKeys={'s':'staff','p':'pd','r':'renewals','t':'tasks','nlogs':'notes_log','supov':'sup_overrides','supimp':'sup_import','pmov':'pm_overrides','up':'uploads','upAt':'uploads_at','hospData':'hospital_data','linkageData':'linkage_data','linkageHistory':'linkage_history','linkageNotesRaw':'linkage_notes_raw','impreg':'import_registry'};
-  if(sharedKeys[k]&&typeof db!=='undefined'&&SB_KEY.length>50){
-    const saved = await db.upsert('appdata',{key:sharedKeys[k],value:JSON.stringify(v)},'key');
-    if(!saved){
-      console.error(`[sv] Save FAILED for '${sharedKeys[k]}' — this change only exists in your browser right now and will be lost on reload until it saves successfully.`);
+  const key=SHARED_KEYS[k];
+  if(!(key&&typeof db!=='undefined'&&SB_KEY.length>50))return true;
+  const body=JSON.stringify(v);
+  const run=async()=>{
+    const label=SV_LABEL[key]||key;
+    if(!(key in SV_SEEN)){
+      showSaveError(`Couldn't save ${label} — this page never finished loading the live copy, so saving could overwrite someone else's work. Reload the page and try again.`);
       return false;
     }
+    const current=await svServerValue(key);
+    if(current===undefined){
+      showSaveError(`Couldn't save ${label} — no connection to the database. Nothing was changed; try again.`);
+      return false;
+    }
+    if(current!==SV_SEEN[key]){
+      console.warn(`[sv] Conflict on '${key}' — changed on the server since this tab loaded it. Not overwriting.`);
+      showSaveError(`Not saved: someone else updated the ${label} since you opened this page. Your change was NOT saved, so nothing of theirs was overwritten. Reload the page, then make your change again.`);
+      return false;
+    }
+    const saved=await db.upsert('appdata',{key,value:body},'key');
+    if(!saved){
+      console.error(`[sv] Save FAILED for '${key}' — this change only exists in your browser right now and will be lost on reload until it saves successfully.`);
+      return false;
+    }
+    SV_SEEN[key]=body;
     return true;
-  }
-  return true;
+  };
+  const p=(SV_QUEUE[key]||Promise.resolve()).then(run,run);
+  SV_QUEUE[key]=p.catch(()=>false);
+  return p;
 }
+// Caches a value in this browser only — used when loading, which must never write to Supabase.
+function cacheLocal(k,v){try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}}
 // Small visible warning for a failed save — console.error alone is too easy to miss, and this
 // class of bug (a save silently not landing in Supabase) is exactly what a manager has no way
 // to notice without something on-screen telling them.
 function showSaveError(msg){
   const t=document.createElement('div');
   t.textContent=`⚠ ${msg}`;
-  t.style.cssText='position:fixed;top:20px;right:20px;background:#B71C1C;color:#fff;padding:10px 16px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:360px';
+  t.className='save-err';
+  const stackTop=20+[...document.querySelectorAll('.save-err')].reduce((y,el)=>y+el.offsetHeight+8,0);
+  t.style.cssText='position:fixed;top:'+stackTop+'px;right:20px;background:#B71C1C;color:#fff;padding:10px 16px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:360px';
   document.body.appendChild(t);
   setTimeout(()=>t.remove(),8000);
 }
@@ -2036,7 +2095,8 @@ async function freshStaff(){
   if(rows&&rows[0]&&rows[0].value){
     try{
       const remote=JSON.parse(rows[0].value);
-      if(Array.isArray(remote)&&remote.length>0)return remote;
+      // The edit is about to be built on this exact copy, so it's what sv()'s conflict check compares against.
+      if(Array.isArray(remote)&&remote.length>0){SV_SEEN.staff=rows[0].value;return remote;}
     }catch(e){console.warn('[freshStaff] parse failed',e);}
   }
   return S.staff; // Supabase unreachable or empty — fall back to what this tab has rather than blocking the edit
@@ -2468,7 +2528,8 @@ async function refreshStaffingData(){
   const btn=document.getElementById('refreshStaffBtn');
   if(btn){btn.disabled=true;btn.textContent='Refreshing…';}
   try{
-    await syncFromSupabase(); // re-renders on completion
+    const ok=await syncFromSupabase(); // re-renders on completion; never writes the roster (FIX 10/12)
+    if(!ok)throw new Error('roster not loaded');
     const t=document.createElement('div');
     t.textContent='✓ Staffing data refreshed from the live roster';
     t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
@@ -2536,6 +2597,7 @@ function setV(){
   const lockBar=locked
     ?`<div style="display:flex;align-items:center;gap:10px;background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:8px 12px;margin-bottom:12px"><span style="font-size:12px;color:#92400E">🔒 Roster editing is locked — view only. Only Brandon, Avril, or Sarah can unlock it.</span><button class="btn-g" style="font-size:11px;margin-left:auto" onclick="H.om('unlock')">Unlock</button></div>`
     :`<div style="display:flex;align-items:center;gap:10px;background:#DCF0DC;border:1px solid #a7d8a7;border-radius:8px;padding:8px 12px;margin-bottom:12px"><span style="font-size:12px;color:#1B5E20">🔓 Roster editing unlocked${S.editUser?` — as ${xe(DIR[S.editUser]?.full||S.editUser)}`:''}</span><button class="btn-g" style="font-size:11px;margin-left:auto" onclick="H.lockEdit()">Lock</button></div>`;
+  const staleBar=ROSTER_STALE?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991B1B;font-weight:600">⚠ Couldn't load the live roster — what you see below may be an old copy saved in this browser. Click "Refresh Staffing Data" before making changes.</div>`:'';
   const dupGroups=dupStaffGroups();
   const dupBar=dupGroups.length===0?'':`<div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:10px 14px;margin-bottom:12px">
     <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:6px">⚠ ${dupGroups.length} name${dupGroups.length>1?'s appear':' appears'} on the roster more than once — this is why a deactivated person can still "show up" (the other row is still Active)</div>
@@ -2553,7 +2615,7 @@ function setV(){
   </div>`;
   return`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px;flex-wrap:wrap"><div style="font-weight:800;font-size:20px;color:#1a2861">⚙ Staff &amp; Settings</div><button id="refreshStaffBtn" onclick="refreshStaffingData()" style="font-size:12px;padding:6px 12px;background:#fff;color:#2C3B7E;border:1px solid #2C3B7E;border-radius:7px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap">🔄 Refresh Staffing Data</button></div>
     <div class="ainfo" style="margin-bottom:12px">Covers all 4 program divisions — Community, Courts &amp; Jail, Hospital, and BH Linkage. Activation/deactivation and adding staff only happen here — those other hubs only display this roster, and only pick up a change the next time they load or someone hits their own Refresh button. If someone you deactivated still shows Active somewhere else, that's the usual reason — ask them to refresh, or hit Refresh Staffing Data above to confirm this hub already has it right.</div>
-    ${lockBar}
+    ${staleBar}${lockBar}
     ${dupBar}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div style="font-weight:700;font-size:13px;color:#1a2861">Roster (${fil.length} shown)</div>${locked?'':'<button class="btn-n" onclick="H.om(\'staff\')">+ Add Staff</button>'}</div>
     <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap"><select class="inp" style="width:auto" onchange="H.ssD(this.value)">${dopts}</select><select class="inp" style="width:auto" onchange="H.ssM(this.value)"><option value="">All Managers</option>${mo}</select><div style="display:flex;border-radius:7px;overflow:hidden;border:1px solid #cdc4b2">${[['Active','Active'],['Inactive','Inactive'],['','All']].map(([v,l])=>`<button onclick="H.ssS('${v}')" style="padding:7px 13px;background:${fs===v?'#2C3B7E':'#fff'};color:${fs===v?'#fff':'#374151'};border:none;cursor:pointer;font-size:12px;font-weight:${fs===v?700:500};font-family:inherit">${l}</button>`).join('')}</div></div>
@@ -8032,7 +8094,9 @@ async delSRow(enc){
       }
     }
     if(btn){btn.textContent='Saving…';}
-    S.staff=[...base,{id,fn,ln,mgr,tp,status:st,reg,nt:''}];
+    // FIX (10/12): new rows now carry `program` from their manager, same as upS() does on a manager
+    // change — other hubs filter their roster on `program`, so a blank one could hide a new hire there.
+    S.staff=[...base,{id,fn,ln,mgr,tp,status:st,reg,nt:'',program:MGR[mgr]?.prog||''}];
     const ok=await sv('s',S.staff);
     if(!ok){
       S.staff=prevStaff;
