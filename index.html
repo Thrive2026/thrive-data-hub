@@ -2681,6 +2681,13 @@ function modH(){
       <div class="fld"><label class="lbl">Status</label><select class="inp" id="sst"><option>Active</option><option>Inactive</option></select></div>
     </div>
     <div class="fld"><label class="lbl">Region</label><input class="inp" id="sr" placeholder="e.g. NEO, Cle W"></div>
+    <div style="font-size:11px;font-weight:700;color:#3e4a78;margin:4px 0 6px">For Provider Match (map)</div>
+    <div style="display:grid;grid-template-columns:110px 1fr 1fr 90px;gap:10px">
+      <div class="fld"><label class="lbl">Gender</label><select class="inp" id="sg"><option value="">—</option><option>Female</option><option>Male</option></select></div>
+      <div class="fld"><label class="lbl">City</label><input class="inp" id="scity" placeholder="e.g. Ashtabula"></div>
+      <div class="fld"><label class="lbl">County</label><input class="inp" id="scounty" placeholder="e.g. Ashtabula"></div>
+      <div class="fld"><label class="lbl">Zip</label><input class="inp" id="szip" placeholder="44004"></div>
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn-g" onclick="H.cm()">Cancel</button><button class="btn-n" id="addStaffBtn" onclick="H.sSt()">Add Staff</button></div>`;}
   else if(M.type==='unlock'){body=`<div style="font-weight:800;font-size:15px;color:#1a2861;margin-bottom:6px">🔒 Unlock Roster Editing</div>
     <div style="font-size:12px;color:#6b7280;margin-bottom:16px">Only Brandon, Avril, or Sarah can edit the staff roster. Sign in with your Thrive Tools account.</div>
@@ -8090,6 +8097,12 @@ async delSRow(enc){
     const tp=document.getElementById('stp')?.value;
     const st=document.getElementById('sst')?.value;
     const reg=document.getElementById('sr')?.value.trim();
+    // NEW (10/13, Sarah): Provider Match map fields can be filled in at add time instead of only
+    // afterward in the roster table.
+    const gender=document.getElementById('sg')?.value||'';
+    const city=document.getElementById('scity')?.value.trim()||'';
+    const county=document.getElementById('scounty')?.value.trim()||'';
+    const zip=document.getElementById('szip')?.value.trim()||'';
     if(isNaN(id)||id<=0){alert('Pimsy ID is required.');return;}
     if(!fn||!ln){alert('First and last name are required.');return;}
     if(MGR[mgr]&&MGR[mgr].prog==='Crisis Center'){alert('New Crisis Center staff are added in the Crisis Center hub (Staff Roster → + Add Staff), which also sets their sign-in email, role, and shift.');return;}
@@ -8121,7 +8134,7 @@ async delSRow(enc){
     if(btn){btn.textContent='Saving…';}
     // FIX (10/12): new rows now carry `program` from their manager, same as upS() does on a manager
     // change — other hubs filter their roster on `program`, so a blank one could hide a new hire there.
-    S.staff=[...base,{id,fn,ln,mgr,tp,status:st,reg,nt:'',program:MGR[mgr]?.prog||''}];
+    S.staff=[...base,{id,fn,ln,mgr,tp,status:st,reg,nt:'',program:MGR[mgr]?.prog||'',gender,city,county,zip}];
     const ok=await sv('s',S.staff);
     if(!ok){
       S.staff=prevStaff;
