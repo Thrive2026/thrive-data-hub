@@ -2101,6 +2101,29 @@ async function freshStaff(){
   }
   return S.staff; // Supabase unreachable or empty — fall back to what this tab has rather than blocking the edit
 }
+// NEW (10/12): Courts & Jail and Hospital both read an 'staff_deleted_ids' tombstone list so a
+// person permanently deleted here stops reappearing from their hardcoded default rosters — their
+// code comments say this hub's delS() writes it, but it never actually did. Now it does: Delete adds
+// the ID, and Add Staff removes it again if that ID is reused for a new hire (otherwise the new person
+// would be hidden in those hubs). Reads the list fresh and changes only those IDs.
+async function updateDeletedIds(addIds,removeIds){
+  try{
+    const rows=await db.get('appdata','key=eq.staff_deleted_ids&select=value');
+    if(rows===null)throw new Error('read failed');
+    let list=[];try{if(rows[0]&&rows[0].value){const v=JSON.parse(rows[0].value);if(Array.isArray(v))list=v;}}catch(e){}
+    const set=new Set(list);
+    (addIds||[]).forEach(i=>set.add(i));(removeIds||[]).forEach(i=>set.delete(i));
+    const next=[...set];
+    if(next.length===list.length&&next.every((v,i)=>v===list[i]))return true;
+    const ok=await db.upsert('appdata',{key:'staff_deleted_ids',value:JSON.stringify(next)},'key');
+    if(!ok)throw new Error('write failed');
+    return true;
+  }catch(e){
+    console.warn('[updateDeletedIds]',e);
+    showSaveError('The roster change saved, but the Courts/Hospital hubs may not pick it up until it is redone — tell Brandon.');
+    return false;
+  }
+}
 
 let S={
   view:lv('view','settings'), selMgr:lv('selMgr',null),
@@ -6615,6 +6638,7 @@ async delS(id){
     return;
   }
   const t=document.createElement('div');
+  updateDeletedIds([staff.id],[]);
   t.textContent=`✓ ${staff.fn} ${staff.ln} deleted — Pimsy ID ${staff.id} is free to reuse`;
   t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
   document.body.appendChild(t);
@@ -6706,6 +6730,7 @@ async delSRow(enc){
     return;
   }
   const t=document.createElement('div');
+  if(!newArr.some(s=>s.id===staff.id))updateDeletedIds([staff.id],[]); // only if no other row still uses this ID
   t.textContent=`✓ ${staff.fn} ${staff.ln} (${staff.reg||'no region'}) row deleted`;
   t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
   document.body.appendChild(t);
@@ -8107,6 +8132,7 @@ async delSRow(enc){
     M.type=null;
     render();
     const t=document.createElement('div');
+    updateDeletedIds([],[id]); // a reused Pimsy ID must not stay hidden in Courts/Hospital
     t.textContent=`✓ ${fn} ${ln} added — saved`;
     t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
     document.body.appendChild(t);
