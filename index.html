@@ -4376,6 +4376,38 @@ async function importEngagementFile(file){
 }
 
 function rowsToTSV(rows){ return rows.map(r=>r.map(c=>String(c==null?'':c)).join('\t')).join('\n'); }
+// ══════════════════════════════════════════════════════════
+// RETENTION LEDGER (NEW 10/16/26) — feeds Director Hub's Graduation & Fall-off tables.
+// appdata 'community_retention' = { updatedAt, asof, firstUpload, clients:{ <hash>: {m, g, lb} } }
+//   m = manager first name, g = graduation date, lb = latest billable note date.
+// Client numbers are one-way hashed; no names, phones, or notes are saved. Each Renewals
+// upload refreshes every client in the file; clients no longer in the file keep their last
+// values (that's how a discharge without graduation still counts as a fall-off).
+// Saved on its own, after the renewals save — a failure here never blocks Renewals.
+// ══════════════════════════════════════════════════════════
+async function retHash(id){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('thrive-ret|'+String(id).trim().toLowerCase()));
+  return Array.from(new Uint8Array(buf)).slice(0,8).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function saveRetention(byClient){
+  try{
+    const ids=Object.keys(byClient||{}); if(!ids.length) return;
+    const rows=await db.get('appdata','key=eq.community_retention');
+    let led=null; try{ led=rows&&rows[0]&&rows[0].value?JSON.parse(rows[0].value):null; }catch(e){}
+    led=led&&led.clients?led:{clients:{}};
+    const today=new Date().toISOString().slice(0,10);
+    for(const id of ids){
+      const v=byClient[id], h=await retHash(id), old=led.clients[h]||{};
+      led.clients[h]={ m:v.m||old.m||null,
+        g: [old.g,v.g].filter(Boolean).sort().pop()||null,
+        lb:[old.lb,v.lb].filter(Boolean).sort().pop()||null };
+    }
+    led.updatedAt=new Date().toISOString(); led.asof=today; led.firstUpload=led.firstUpload||today;
+    const ok=await db.upsert('appdata',{key:'community_retention',value:JSON.stringify(led)},'key');
+    if(!ok) throw new Error('save failed');
+  }catch(e){ console.warn('[saveRetention]',e); showSaveError('Renewals saved, but the graduation/fall-off data didn’t — re-upload the Renewals file to retry.'); }
+}
+
 async function readFileSmart(file, onText){
   if(/\.xlsx?$/i.test(file.name)){
     const r=new FileReader();
@@ -7984,6 +8016,7 @@ async delSRow(enc){
     const lines=raw.trim().split('\n').filter(l=>l.trim());
     let start=0;
     let colClient=0, colPeer=2, colReferral=6, colRenewalName=7, colRenewalType=8, colExpires=10, colLastBillable=13;
+    let colRenewalDate=-1; // NEW 10/16/26 — the Graduation row's Renewal Date = the graduation date (retention metrics)
     if(lines[0]&&/client number/i.test(lines[0])){
       start=1;
       const hdr=lines[0].split('\t').map(h=>h.trim());
@@ -7995,7 +8028,13 @@ async delSRow(enc){
       const rti=find([/^renewal type$/i]); if(rti>=0)colRenewalType=rti;
       const ei=find([/^expires on$/i]); if(ei>=0)colExpires=ei;
       const lbi=find([/^last billable note date$/i]); if(lbi>=0)colLastBillable=lbi;
+      colRenewalDate=find([/^renewal date$/i]);
     }
+    // NEW (10/16/26, per Sarah/Brandon): graduation + fall-off tracking for Director Hub.
+    // One entry per client: manager, latest graduation date, latest billable note date.
+    // Saved separately (key 'community_retention') with the client number one-way hashed —
+    // this does not touch the renewals merge below in any way.
+    const retention={};
     // Every clientId that appears ANYWHERE in the file, regardless of whether their peer
     // supporter name matched the roster or their row had a due date — this is the "is this
     // client still in Pimsy's tracker at all" signal used below to auto-close out clients who
@@ -8024,6 +8063,12 @@ async delSRow(enc){
       if(!clientId||!peerRaw){continue;}
       const nameKey=peerRaw.toLowerCase().replace(/\s+/g,' ');
       const staff=resolveStaffByAlias(peerRaw)||staffByName[nameKey];
+      if(staff && staff.mgr){
+        const rk=clientId.toLowerCase(); const e=retention[rk]=retention[rk]||{m:staff.mgr,g:null,lb:null};
+        e.m=staff.mgr;
+        if(lastBillableDate && (!e.lb || lastBillableDate>e.lb)) e.lb=lastBillableDate;
+        if(/graduat/i.test(renewalName+' '+renewalType) && colRenewalDate>=0){ const gd=parseUSDate(p[colRenewalDate]); if(gd && (!e.g || gd>e.g)) e.g=gd; }
+      }
       if(!staff){
         noMatch++;
         if(!seenUnmatched.has(nameKey)){seenUnmatched.add(nameKey);unmatchedNames.push(peerRaw);}
@@ -8039,7 +8084,7 @@ async delSRow(enc){
 
     const {toImport,toUpdate,dupes,reassignments}=ThriveRenewals.mergeRenewalImport(S.renewals,parsedRows,{dueDateFallbackDays:5,knownClientIds});
     const closed=toUpdate.filter(u=>u.reason==='discharged').length;
-    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[]};
+    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[],retention};
     modH();
   },
   // FIX: previously only applied rev.toImport and returned early whenever there were zero new
@@ -8060,7 +8105,7 @@ async delSRow(enc){
   async confirmRenBulk(){
     const rev=M.prevRen;
     const nImport=rev?rev.toImport.length:0, nUpdate=rev?(rev.toUpdate||[]).length:0;
-    if(!rev||(nImport===0&&nUpdate===0)){M.prevRen=null;render();return;}
+    if(!rev||(nImport===0&&nUpdate===0)){ if(rev&&rev.retention) await saveRetention(rev.retention); M.prevRen=null;render();return;}
     const btn=document.getElementById('renBulkConfirmBtn');
     if(btn){btn.disabled=true;btn.textContent='Saving…';}
     const nextRenewals=S.renewals.slice();
@@ -8093,6 +8138,7 @@ async delSRow(enc){
     }
     S.renewals=nextRenewals;
     recordImport('renewals_workbook', {row_count:nImport+nUpdate});
+    if(rev.retention) await saveRetention(rev.retention);
     M.prevRen=null;render();
     const t=document.createElement('div');t.textContent=`✓ Applied ${nImport+nUpdate} change${(nImport+nUpdate)!==1?'s':''} (${nImport} new, ${nUpdate} updated) — saved`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
