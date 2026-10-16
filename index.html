@@ -2807,6 +2807,7 @@ function modH(){
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📋 Pimsy Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">One upload, fills Linkage + Courts/Jail</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the raw Pimsy Notes export (.xlsx) here — one file, one upload. U-code pipeline/revenue/G9009/outreach for Linkage and Clients/Billable Encounters for Courts/Jail are both read straight from it, most-recent-month only. <strong>Clinical Goals and Linkage U-code outcomes are also computed automatically from this same file</strong> — no separate upload, no extra confirm step; each posts its own toast when it's done. You can also drop the <strong>old Linkage Dashboard workbook</strong> here to one-time backfill real historical months (Sept 2025 onward) that the new pipeline has no other way to reconstruct.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileNotes(this)" style="font-size:12px;font-family:inherit">
+      ${dhscPreview('notes',true)}
       <div style="margin-top:8px">
         <button class="btn-g" style="font-size:11px" onclick="H.recomputeLinkageFromRaw()" title="Re-runs the current parser over every month's Pimsy Notes rows already on file — use this once after a Provider Scorecard change like the U1–U9 breakdown, so old months fill in without a re-upload.">🔄 Recompute Linkage from Notes on File</button>
       </div>
@@ -2919,6 +2920,19 @@ function modH(){
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the real Supervision Tracking workbook (.xlsx) — reads the PRS Tracking, QBHS Tracking, SWT Supervision, and CDCA Tracking tabs directly. Plain paste/upload (Staff Name, Credential, Month, Completed Y/N) still works too.</div>
       <input type="file" accept=".xlsx,.xls,.csv,.txt" onchange="H.slotFileSup(this)" style="font-size:12px;font-family:inherit">
       ${prevSup?previewBlock('Supervision',prevSup,'commitSup'):''}
+      ${dhscPreview('sup',true)}
+    </div>
+    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🚗 TripLog Mileage <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">At payroll cutoff · Manager Scorecard</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">TripLog “Mileage and Expenses” multi-user report (.csv, or the .zip TripLog emails). Feeds the mileage-review measure on Sarah’s Manager Scorecard.</div>
+      <input type="file" accept=".csv,.zip" onchange="dhscFile('tl',this)" style="font-size:12px;font-family:inherit">
+      ${dhscPreview('tl')}
+    </div>
+    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📝 JotForm Mileage <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">At payroll cutoff · Manager Scorecard</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Mileage Form Tracker workbook (.xlsx) — reads the Form Responses tab (Manager Approval box). Feeds the mileage-review measure on Sarah’s Manager Scorecard.</div>
+      <input type="file" accept=".xlsx" onchange="dhscFile('jf',this)" style="font-size:12px;font-family:inherit">
+      ${dhscPreview('jf')}
     </div>
     <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🏥 Hospital Outcomes Tracking <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Biweekly</span></div>
@@ -4406,6 +4420,468 @@ async function saveRetention(byClient){
     const ok=await db.upsert('appdata',{key:'community_retention',value:JSON.stringify(led)},'key');
     if(!ok) throw new Error('save failed');
   }catch(e){ console.warn('[saveRetention]',e); showSaveError('Renewals saved, but the graduation/fall-off data didn’t — re-upload the Renewals file to retry.'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// MANAGER SCORECARD — pure parsing + scoring core (no DOM, no network).
+// Kept free of browser APIs so it can be regression-tested in Node
+// against real exports (see sc-core.test.js). Everything here takes plain
+// arrays/strings in and returns plain objects out.
+// ══════════════════════════════════════════════════════════════
+const SC = (function(){
+  // Sarah's direct-report managers. `first` must match the roster's `mgr` field.
+  const MANAGERS = [
+    {first:'Brian', full:'Brian Smith'},
+    {first:'Cara',  full:'Cara Steidley'},
+    {first:'John',  full:'John Mohr'},
+    {first:'Luke',  full:'Luke Lenz'},
+  ];
+  const TARGETS = { qaCalls:15 };
+
+  const norm = s => String(s==null?'':s)
+    .replace(/&amp;/g,'&').replace(/\([^)]*\)/g,' ')
+    .replace(/[​-‍﻿]/g,'')
+    .toLowerCase().replace(/[^a-z\s'-]/g,' ').replace(/\s+/g,' ').trim();
+  const pad = n => String(n).padStart(2,'0');
+
+  // Excel serial -> "wall clock" string YYYY-MM-DDTHH:MM (no timezone math at all;
+  // every duration below is computed wall-clock to wall-clock, so TZ never matters).
+  function serialToStamp(v){
+    if(v==null || v==='') return null;
+    if(typeof v==='number'){
+      const d = new Date(Math.round((v-25569)*86400000));
+      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    }
+    if(v instanceof Date){
+      return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}T${pad(v.getHours())}:${pad(v.getMinutes())}`;
+    }
+    const s = String(v).trim();
+    let m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2}))?/);
+    if(m) return `${m[1]}-${m[2]}-${m[3]}T${pad(m[4]||0)}:${m[5]||'00'}`;
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
+    if(m){
+      let y = +m[3]; if(y<100) y += 2000;
+      let h = +(m[4]||0); if(m[6]){ const pm=/pm/i.test(m[6]); if(pm&&h<12)h+=12; if(!pm&&h===12)h=0; }
+      return `${y}-${pad(m[1])}-${pad(m[2])}T${pad(h)}:${m[5]||'00'}`;
+    }
+    return null;
+  }
+  const stampMs = s => s ? Date.parse(s+':00Z') : NaN;
+  const hoursBetween = (a,b) => (stampMs(b)-stampMs(a))/3600000;
+  const monthOf = s => s ? s.slice(0,7) : null;
+  const dayOf = s => s ? s.slice(0,10) : null;
+
+  function mgrFromName(raw){
+    const t = norm(raw).split(' ');
+    if(!t[0]) return null;
+    return MANAGERS.find(M=>{
+      const [f,l] = M.full.toLowerCase().split(' ');
+      return t[0]===f && t[1] && t[1].length>=2 && l.startsWith(t[1].slice(0,2)) && (t[1].length<l.length ? l.startsWith(t[1]) : t[1].startsWith(l));
+    }) || null;
+  }
+
+  function headerIndex(hdr, name){
+    const want = norm(name);
+    return hdr.findIndex(h => norm(h)===want);
+  }
+
+  // ── Supervision (JotForm "Integration" tab of the Supervision Tracking workbook) ──
+  function parseSupervision(rows){
+    const hdr = (rows[0]||[]).map(String);
+    const iD=headerIndex(hdr,'Date of Supervision'), iS=headerIndex(hdr,'Staff Member Name'),
+          iSup=headerIndex(hdr,'Supervisor Name'), iT=headerIndex(hdr,'Type of Supervision');
+    if([iD,iS,iSup,iT].some(i=>i<0)) throw new Error('Could not find the Integration tab columns (Date of Supervision, Staff Member Name, Supervisor Name, Type of Supervision).');
+    const sessions=[], unmatchedSup={};
+    let skippedNoType=0;
+    for(let r=1;r<rows.length;r++){
+      const row=rows[r]; if(!row) continue;
+      const date = dayOf(serialToStamp(row[iD])); if(!date) continue;
+      const tRaw = String(row[iT]||'').toLowerCase();
+      const type = /individual/.test(tRaw)&&/caseload/.test(tRaw) ? 'IC' : /individual/.test(tRaw) ? 'I' : /caseload/.test(tRaw) ? 'C' : /group/.test(tRaw) ? 'G' : null;
+      if(!type){ skippedNoType++; continue; }
+      let staff=[];
+      const sRaw = String(row[iS]||'').replace(/&amp;/g,'&');
+      try{ const arr=JSON.parse(sRaw); staff = arr.map(x=>x['First & Last Name']||x.name||'').filter(Boolean); }
+      catch(e){ if(sRaw.trim()) staff=[sRaw.trim()]; }
+      staff = staff.filter(n=>!/^(test|jane doe|john doe|elvis presley)\b/i.test(n.trim()));
+      if(!staff.length) continue;
+      const M = mgrFromName(row[iSup]);
+      if(!M){ const k=String(row[iSup]||'').trim(); unmatchedSup[k]=(unmatchedSup[k]||0)+1; continue; }
+      sessions.push({d:date, m:M.first, t:type, s:staff});
+    }
+    return {sessions, skippedNoType, otherSupervisors:unmatchedSup};
+  }
+
+  // ── Pimsy Notes export ──
+  // Keeps ONLY what the scorecard needs. Client #, insurance, diagnosis, auth #, etc. are
+  // never read. The note # is reduced to a one-way hash (via hashFn) purely so overlapping
+  // weekly uploads de-duplicate; it can't be turned back into a note number.
+  async function parseNotes(rows, hashFn){
+    const hdr=(rows[0]||[]).map(String);
+    const col = n => headerIndex(hdr,n);
+    const I = { no:col('Note #'), svc:col('Service Date'), type:col('Note Type'), perf:col('Performed By'),
+      mgr:col('Manager'), rfrF:col('Released For Review'), rfr:col('Released For Review Date'),
+      revF:col('Reviewed'), rev:col('Reviewed Date'), revBy:col('Reviewed By') };
+    const missing = Object.entries(I).filter(([k,v])=>v<0 && k!=='mgr').map(([k])=>k);
+    if(missing.length) throw new Error('This doesn’t look like the Pimsy Notes export (missing: '+missing.join(', ')+').');
+    const out=[]; let maxStamp='', minStamp='';
+    const bump = s => { if(!s) return; if(s>maxStamp) maxStamp=s; if(!minStamp||s<minStamp) minStamp=s; };
+    for(let r=1;r<rows.length;r++){
+      const row=rows[r]; if(!row || row[I.no]==null || row[I.no]==='') continue;
+      const svc=serialToStamp(row[I.svc]), rfr=serialToStamp(row[I.rfr]), rev=serialToStamp(row[I.rev]);
+      bump(rfr); bump(rev);
+      const isQA = /^qa call$/i.test(String(row[I.type]||'').trim());
+      out.push({
+        h: await hashFn(String(row[I.no])),
+        q: isQA?1:0,
+        p: String(row[I.perf]||'').trim(),
+        m: I.mgr>=0 ? String(row[I.mgr]||'').trim() : '',
+        sv: svc,
+        rf: truthy(row[I.rfrF]) ? rfr : null,
+        rv: truthy(row[I.revF]) ? rev : null,
+        rb: String(row[I.revBy]||'').trim()
+      });
+    }
+    return {notes:out, asof:maxStamp, from:minStamp};
+  }
+  const truthy = v => v===true || /^(true|yes|y|1)$/i.test(String(v||'').trim());
+
+  function mergeNotes(existing, incoming, keepDays=150){
+    const map = new Map();
+    (existing&&existing.notes||[]).forEach(n=>map.set(n.h,n));
+    incoming.notes.forEach(n=>map.set(n.h,n));   // newer upload wins
+    const asof = [existing&&existing.asof, incoming.asof].filter(Boolean).sort().pop();
+    const cutoff = new Date(stampMs(asof) - keepDays*86400000).toISOString().slice(0,10);
+    const notes = [...map.values()].filter(n => (n.sv||n.rf||'9999') >= cutoff);
+    const from = [existing&&existing.from, incoming.from].filter(Boolean).sort()[0];
+    return {notes, asof, from: from < cutoff ? cutoff : from};
+  }
+
+  // ── TripLog multi-user report CSV ──
+  function parseCsvLine(line){
+    const out=[]; let cur='', q=false;
+    for(let i=0;i<line.length;i++){
+      const c=line[i];
+      if(q){ if(c==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+      else if(c==='"') q=true; else if(c===','){ out.push(cur); cur=''; } else cur+=c;
+    }
+    out.push(cur); return out;
+  }
+  function parseTripLog(text){
+    const lines = text.replace(/^﻿/,'').split(/\r?\n/);
+    const byUser={}; let user=null, hdr=null, asof=null, trips=0;
+    const gm = text.match(/Generated on ([A-Za-z]{3}) (\d{1,2}), (\d{4})/);
+    if(gm){ const mi=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(gm[1].toLowerCase()); asof=`${gm[3]}-${pad(mi+1)}-${pad(gm[2])}`; }
+    for(let i=0;i<lines.length;i++){
+      const L=lines[i]; if(!L.trim()) continue;
+      if(/^TripLog_/.test(L)){
+        hdr=null; user=null;
+        const nm = (lines[i+1]||'').match(/^\S+ to \S+ (.+?) TripLog Mileage/);
+        if(nm) user = nm[1].trim();
+        else { const m=L.match(/^TripLog_\d+_\d+_\d+_to_\d+_\d+_\d+_([^_]+)_([^_]+)_/); if(m) user=`${m[2]} ${m[1]}`; }
+        continue;
+      }
+      const cells = parseCsvLine(L).map(s=>s.trim());
+      if(cells[0]==='Date' && cells.includes('Status')){ hdr=cells; continue; }
+      if(hdr && user && /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(cells[0])){
+        const st = (cells[hdr.indexOf('Status')]||'').toLowerCase();
+        const d = serialToStamp(cells[0]); if(!d) continue;
+        const k = norm(user), mo = monthOf(d);
+        byUser[k] = byUser[k] || {n:user, mo:{}};
+        const b = byUser[k].mo[mo] = byUser[k].mo[mo] || {s:0,a:0,u:0};
+        if(st==='submitted') b.s++;
+        else if(st==='approved' || st==='rejected' || st==='pay scheduled' || st==='paid' || st==='reimbursed') b.a++;
+        else b.u++;   // blank = staff hasn't submitted yet (not the manager's step)
+        trips++;
+      } else if(hdr && cells[0] && !/^\d/.test(cells[0])) { hdr=null; }
+    }
+    if(!trips) throw new Error('No TripLog trip rows found — upload the per-user “Mileage and Expenses” CSV report.');
+    return {asof, byUser, trips, users:Object.keys(byUser).length};
+  }
+
+  // ── JotForm Mileage Form Tracker ("Form Responses" tab) ──
+  function parseMileageForm(rows){
+    const hdr=(rows[0]||[]).map(String);
+    const iA=headerIndex(hdr,'Manager Approval'), iN=headerIndex(hdr,'First Name'),
+          iE=headerIndex(hdr,'Thrive Email Address'), iD=headerIndex(hdr,'Date of Trip(s)');
+    if([iA,iN,iD].some(i=>i<0)) throw new Error('Could not find the Form Responses columns (Manager Approval, First Name, Date of Trip(s)).');
+    const out=[];
+    for(let r=1;r<rows.length;r++){
+      const row=rows[r]; if(!row) continue;
+      const d=dayOf(serialToStamp(row[iD])); const n=String(row[iN]||'').trim();
+      if(!d || !n || d<'2024-01-01' || d>'2030-12-31') continue;
+      if(/^test\b/i.test(n)) continue;
+      out.push({n, e:iE>=0?String(row[iE]||'').trim().toLowerCase():'', d, a:truthy(row[iA])?1:0});
+    }
+    return {rows:out};
+  }
+
+  // ── Scoring ──
+  // roster: [{fn,ln,mgr,status,id,...}]; resolve(name) -> roster record or null
+  function eligibleStaff(roster, mgrFirst, month){
+    const [y,m] = month.split('-').map(Number);
+    const cutoff = `${y}-${pad(m)}-15`;
+    return roster.filter(s=>{
+      if(s.mgr!==mgrFirst) return false;
+      const st = String(s.status||'Active');
+      if(/inactive|depart|term/i.test(st)) return false;
+      if(/leave|loa/i.test(st) || s.onLeave===true || s.leave===true) return false;
+      const hire = s.hire || s.hireDate || s.start || s.startDate || s.doh || null;
+      if(hire){ const h=dayOf(serialToStamp(hire)); if(h && h>cutoff) return false; }
+      return true;
+    });
+  }
+
+  function scoreSupervision(sessions, roster, resolve, M, month){
+    const elig = eligibleStaff(roster, M.first, month);
+    const eligKeys = new Set(elig.map(s=>norm(s.fn+' '+s.ln)));
+    const mine = (sessions||[]).filter(x=>x.m===M.first && x.d.slice(0,7)===month);
+    const groups = mine.filter(x=>x.t==='G').length;
+    const ind=new Set(), cr=new Set(), unmatched=new Set();
+    mine.forEach(x=>x.s.forEach(n=>{
+      const rec = resolve(n); const k = rec ? norm(rec.fn+' '+rec.ln) : null;
+      if(!k || !eligKeys.has(k)){ if(!rec) unmatched.add(n); return; }
+      if(x.t==='IC'){ ind.add(k); cr.add(k); }
+      else if(x.t==='I') ind.add(k);
+      else if(x.t==='C') cr.add(k);
+    }));
+    const missingInd = elig.filter(s=>!ind.has(norm(s.fn+' '+s.ln))).map(s=>s.fn+' '+s.ln);
+    const missingCr  = elig.filter(s=>!cr.has(norm(s.fn+' '+s.ln))).map(s=>s.fn+' '+s.ln);
+    return { eligible:elig.length, groups, ind:ind.size, cr:cr.size, missingInd, missingCr, unmatched:[...unmatched], sessions:mine.length };
+  }
+
+  function scoreQA(notesStore, M, month){
+    const n = (notesStore&&notesStore.notes||[]).filter(x=>x.q && norm(x.p)===norm(M.full) && monthOf(x.sv)===month).length;
+    return { count:n, target:TARGETS.qaCalls };
+  }
+
+  function noteManager(n, roster, resolve){
+    if(n.m) return mgrFromName(n.m);
+    const rec = resolve(n.p);
+    return rec ? (MANAGERS.find(M=>M.first===rec.mgr)||null) : null;
+  }
+
+  function scoreReview(notesStore, roster, resolve, M, month){
+    const asof = notesStore && notesStore.asof;
+    if(!asof) return null;
+    let onTime=0, late=0, overdue=0, waiting=0, byOthers=0, total=0;
+    const reviewDays = new Set();
+    (notesStore.notes||[]).forEach(n=>{
+      if(n.rv && norm(n.rb)===norm(M.full)) reviewDays.add(dayOf(n.rv));
+      if(n.q || !n.rf || monthOf(n.rf)!==month) return;
+      if(norm(n.p)===norm(M.full)) return;           // manager's own notes aren't theirs to review
+      const NM = noteManager(n, roster, resolve); if(!NM || NM.first!==M.first) return;
+      total++;
+      if(n.rv){
+        if(hoursBetween(n.rf,n.rv) <= 48) onTime++; else late++;
+        if(norm(n.rb)!==norm(M.full)) byOthers++;
+      } else if(hoursBetween(n.rf, asof) > 48) overdue++;
+      else waiting++;
+    });
+    const scored = onTime+late+overdue;
+    // 2x weekly: Mon–Sun weeks whose Monday falls in this month, inside the data window.
+    const weeks=[]; const [y,m]=month.split('-').map(Number);
+    const from = dayOf(notesStore.from), to = dayOf(asof);
+    for(let d=new Date(Date.UTC(y,m-1,1)); d.getUTCMonth()===m-1; d.setUTCDate(d.getUTCDate()+1)){
+      if(d.getUTCDay()!==1) continue;
+      const mon=d.toISOString().slice(0,10);
+      const sunD=new Date(d); sunD.setUTCDate(sunD.getUTCDate()+6); const sun=sunD.toISOString().slice(0,10);
+      if(from && sun < from) continue;
+      if(mon > to) continue;
+      let days=0; reviewDays.forEach(x=>{ if(x>=mon && x<=sun) days++; });
+      const complete = sun <= to;
+      if(complete || days>=2) weeks.push({mon, days, met:days>=2});
+    }
+    return { total, onTime, late, overdue, waiting, byOthers, pct: scored? onTime/scored : null,
+             weeks, weeksMet: weeks.filter(w=>w.met).length, asof };
+  }
+
+  function scoreMileage(tl, jf, roster, resolve, M, month){
+    const elig = eligibleStaff(roster, M.first, month);
+    const keys = new Set(elig.map(s=>norm(s.fn+' '+s.ln)));
+    const emails = new Map(); elig.forEach(s=>{ const e=String(s.email||s.em||'').toLowerCase(); if(e) emails.set(e, norm(s.fn+' '+s.ln)); });
+    let tA=0,tS=0, jA=0,jT=0;
+    if(tl && tl.byUser){
+      Object.values(tl.byUser).forEach(u=>{
+        const rec=resolve(u.n); const k=rec?norm(rec.fn+' '+rec.ln):null;
+        if(!k||!keys.has(k)) return;
+        const b=u.mo[month]; if(!b) return; tA+=b.a; tS+=b.s;
+      });
+    }
+    const jfOpen=[];
+    if(jf && jf.rows){
+      jf.rows.forEach(r=>{
+        if(r.d.slice(0,7)!==month) return;
+        const rec=resolve(r.n); let k=rec?norm(rec.fn+' '+rec.ln):null;
+        if(!k && r.e) k=emails.get(r.e)||null;
+        if(!k||!keys.has(k)) return;
+        jT++; if(r.a) jA++; else jfOpen.push(r.n+' ('+r.d.slice(5)+')');
+      });
+    }
+    // Scored separately and the LOWER one counts: TripLog volume (hundreds of trips) would
+    // otherwise drown out a handful of unapproved JotForm submissions in a pooled %.
+    const tlPct = (tA+tS)? tA/(tA+tS) : null, jfPct = jT? jA/jT : null;
+    const avail = [tlPct,jfPct].filter(v=>v!=null);
+    return { tlActed:tA, tlPending:tS, jfApproved:jA, jfTotal:jT, jfOpen, tlPct, jfPct,
+             pct: avail.length? Math.min(...avail) : null, tlAsof: tl&&tl.asof };
+  }
+
+  function workdays(month, upTo){
+    const [y,m]=month.split('-').map(Number); const out=[];
+    for(let d=new Date(Date.UTC(y,m-1,1)); d.getUTCMonth()===m-1; d.setUTCDate(d.getUTCDate()+1)){
+      const s=d.toISOString().slice(0,10); if(upTo && s>upTo) break;
+      const wd=d.getUTCDay(); if(wd>0&&wd<6) out.push(s);
+    }
+    return out;
+  }
+  function scoreAccess(accessByEmail, M, month, today, emailFor){
+    const email = emailFor(M);
+    const rec = accessByEmail && (accessByEmail[email] || Object.values(accessByEmail).find(a=>norm(a.name)===norm(M.full)));
+    if(!rec) return { tracked:false };
+    const wds = workdays(month, today);
+    const set = new Set(rec.dates||[]);
+    const hit = wds.filter(d=>set.has(d)).length;
+    const last = (rec.dates||[]).slice().sort().pop()||null;
+    return { tracked:true, days:hit, of:wds.length, pct: wds.length? hit/wds.length : null, last };
+  }
+  function scoreFollowUp(oo, month, today){
+    const tasks = (oo&&oo.tasks)||[];
+    const due = tasks.filter(t=>t.due && t.due.slice(0,7)===month && t.due<=today);
+    const onTime = due.filter(t=>t.done && (t.doneAt||'').slice(0,10) <= t.due).length;
+    const lateDone = due.filter(t=>t.done && (t.doneAt||'').slice(0,10) > t.due).length;
+    const open = due.filter(t=>!t.done).length;
+    return { due:due.length, onTime, lateDone, open, pct: due.length? onTime/due.length : null };
+  }
+
+  // Flagged Notes Tracker follow-up. flags: [{mgr:'Full Name'|null, d:'YYYY-MM-DD', acted:bool}]
+  // A flag counts once it's 2+ days old (same grace idea as the 48-hour review clock).
+  function scoreFlags(flags, M, month, today){
+    if(!flags) return null;
+    const grace = new Date(Date.parse(today+'T00:00:00Z') - 2*86400000).toISOString().slice(0,10);
+    const mine = flags.filter(f=>f.mgr && norm(f.mgr)===norm(M.full) && f.d && f.d.slice(0,7)===month);
+    const counted = mine.filter(f=>f.d<=grace);
+    const acted = counted.filter(f=>f.acted).length;
+    return { flagged:mine.length, counted:counted.length, acted, open:counted.length-acted,
+             recent:mine.length-counted.length, pct: counted.length? acted/counted.length : null };
+  }
+
+  return { scoreFlags, MANAGERS, TARGETS, norm, serialToStamp, hoursBetween, mgrFromName,
+    parseSupervision, parseNotes, mergeNotes, parseTripLog, parseMileageForm,
+    eligibleStaff, scoreSupervision, scoreQA, scoreReview, scoreMileage, scoreAccess, scoreFollowUp, workdays };
+})();
+
+// ══════════════════════════════════════════════════════════
+// MANAGER SCORECARD FEEDS (moved here from Director Hub 10/16/26 — one upload place for everything).
+// Same parsers as Director Hub (the SC core above is a straight copy — keep both in sync) and the same
+// appdata keys Director Hub's Manager Scorecard reads:
+//   scorecard_supervision      ← rides along with the Supervision Tracking upload (Integration tab)
+//   scorecard_notes            ← rides along with the Pimsy Notes upload (hashed note id + staff/manager/review dates only)
+//   scorecard_triplog          ← TripLog upload (trip counts per staff/month/status only)
+//   scorecard_jotform_mileage  ← JotForm Mileage upload (staff name/email, trip date, approved yes/no only)
+// No client names, numbers, addresses, or diagnoses are saved. The scorecard part is saved after the
+// main import and never blocks it; a scorecard problem shows as a note in the preview.
+// ══════════════════════════════════════════════════════════
+const DHSC_KEYS = { sup:'scorecard_supervision', notes:'scorecard_notes', tl:'scorecard_triplog', jf:'scorecard_jotform_mileage' };
+const DHSC_LABEL = { sup:'Supervision', notes:'Pimsy Notes', tl:'TripLog', jf:'JotForm Mileage' };
+const DHSC = {};   // pending previews by kind
+let dhscXP = null;
+function dhscXlsx(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  if(!dhscXP) dhscXP = new Promise((res,rej)=>{ const sc=document.createElement('script'); sc.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    sc.onload=()=>res(window.XLSX); sc.onerror=()=>{ dhscXP=null; rej(new Error('Could not load the spreadsheet reader — check your connection.')); }; document.head.appendChild(sc); });
+  return dhscXP;
+}
+async function dhscHash(str){ // same salt as Director Hub so weekly uploads de-duplicate across both
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('thrive-sc|'+str));
+  return Array.from(new Uint8Array(buf)).slice(0,6).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+const dhscRows = (X, wb, pattern) => { const name = pattern ? wb.SheetNames.find(n=>pattern.test(n)) : wb.SheetNames[0];
+  if(!name) return null; return X.utils.sheet_to_json(wb.Sheets[name], {header:1, raw:true, defval:null, blankrows:false}); };
+function dhscResolver(){
+  const byName=new Map(), byId=new Map(), byFL=new Map();
+  (S.staff||[]).forEach(st=>{ if(st.fn&&st.ln){ const k=SC.norm(st.fn+' '+st.ln); byName.set(k,st); const t=k.split(' '); if(t.length>2&&!byFL.has(t[0]+' '+t[t.length-1])) byFL.set(t[0]+' '+t[t.length-1],st); if(st.id!=null) byId.set(String(st.id),st); } });
+  return raw => { const k=SC.norm(raw); if(!k) return null; if(byName.has(k)) return byName.get(k);
+    const aid = STAFF_ALIAS_MAP[normAliasName(raw)]; if(aid!=null && byId.has(String(aid))) return byId.get(String(aid));
+    const t=k.split(' '); return t.length>1 ? (byName.get(t[0]+' '+t[t.length-1])||byFL.get(t[0]+' '+t[t.length-1])||null) : null; };
+}
+async function dhscGet(key){ const rows=await db.get('appdata','key=eq.'+encodeURIComponent(key)); return rows&&rows[0]&&rows[0].value?JSON.parse(rows[0].value):null; }
+async function dhscSet(key,val){ const ok=await db.upsert('appdata',{key,value:JSON.stringify(val)},'key'); if(!ok) throw new Error('Save to Supabase failed for '+key+'.'); }
+const dhscEsc = x => String(x==null?'':x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function dhscRefresh(){ if(M.type==='data') modH(); }
+
+// Reads the file for the scorecard and stages a preview. `quiet` = it rides along with another upload,
+// so a missing tab is just a note, not an error.
+async function dhscSlot(kind, f, quiet){
+  DHSC[kind] = { busy:true }; dhscRefresh();
+  try{
+    const X = await dhscXlsx(); const buf = await f.arrayBuffer(); const now = new Date().toISOString(); const resolve = dhscResolver();
+    if(kind==='sup'){
+      const rows = dhscRows(X, X.read(buf,{type:'array'}), /integration/i);
+      if(!rows){ DHSC[kind] = quiet ? {note:'Manager Scorecard: no Integration tab in this file, so the scorecard wasn’t updated.'} : {error:'No Integration tab found.'}; return; }
+      const p = SC.parseSupervision(rows);
+      const cutoff = new Date(Date.now()-540*86400000).toISOString().slice(0,10);
+      const sessions = p.sessions.filter(x=>x.d>=cutoff);
+      const names = new Set(); sessions.forEach(x=>x.s.forEach(n=>{ if(!resolve(n)) names.add(n); }));
+      DHSC[kind] = { lines:[`Manager Scorecard: ${sessions.length} supervision sessions for ${SC.MANAGERS.map(m=>m.first).join(', ')} (last 18 months) will also be saved`,
+        names.size?`${names.size} staff names not on the roster won’t count: ${[...names].slice(0,10).map(dhscEsc).join(', ')}${names.size>10?'…':''}`:'All staff names matched the roster'],
+        apply: async()=>{ await dhscSet(DHSC_KEYS.sup, {updatedAt:now, sessions}); } };
+    } else if(kind==='notes'){
+      const rows = dhscRows(X, X.read(buf,{type:'array'}));
+      let p; try{ p = await SC.parseNotes(rows, dhscHash); }catch(e){ DHSC[kind] = quiet ? {note:'Manager Scorecard: '+e.message} : {error:e.message}; return; }
+      const isMgr = n => !!SC.mgrFromName(n);
+      p.notes = p.notes.filter(n => !n.m || isMgr(n.m) || isMgr(n.rb) || isMgr(n.p) || (resolve(n.p)&&SC.MANAGERS.some(M=>M.first===resolve(n.p).mgr)));
+      const qa = p.notes.filter(n=>n.q).length, rf = p.notes.filter(n=>n.rf).length;
+      DHSC[kind] = { lines:[`Manager Scorecard: ${p.notes.length} notes (${String(p.from).slice(0,10)} → ${String(p.asof).slice(0,10)}) · ${rf} sent for review · ${qa} QA calls will also be saved (merged with earlier uploads, ~5 months kept)`],
+        apply: async()=>{ const merged = SC.mergeNotes(await dhscGet(DHSC_KEYS.notes), p); merged.updatedAt = now; await dhscSet(DHSC_KEYS.notes, merged); } };
+    } else if(kind==='tl'){
+      let text;
+      if(/\.zip$/i.test(f.name)){ const z=X.CFB.read(new Uint8Array(buf),{type:'array'}); const e=z.FileIndex.find(x=>/\.csv$/i.test(x.name)); if(!e) throw new Error('No .csv found inside that zip.'); text=new TextDecoder().decode(e.content); }
+      else text = new TextDecoder().decode(buf);
+      const p = SC.parseTripLog(text);
+      const unk = Object.values(p.byUser).filter(u=>!resolve(u.n)).map(u=>u.n);
+      const v = { updatedAt:now, asof:p.asof, byUser:p.byUser };
+      DHSC[kind] = { lines:[`${p.trips} trips across ${p.users} staff · report generated ${p.asof||'?'}`,
+        unk.length?`${unk.length} TripLog users not on the roster won’t count: ${unk.slice(0,10).map(dhscEsc).join(', ')}${unk.length>10?'…':''}`:'All TripLog users matched the roster',
+        'Saved: trip counts per staff/month/status only — no addresses, amounts, or tags.'],
+        apply: async()=>{ await dhscSet(DHSC_KEYS.tl, v); } };
+    } else if(kind==='jf'){
+      // sheetRows cap: the Manager Approval checkbox column is filled down ~1M rows.
+      const rows = dhscRows(X, X.read(buf,{type:'array', sheetRows:50000, dense:true}), /form responses/i);
+      if(!rows) throw new Error('Could not find the Form Responses tab.');
+      const p = SC.parseMileageForm(rows);
+      const unkM = new Map(); p.rows.forEach(r=>{ if(!resolve(r.n)) unkM.set(SC.norm(r.n), r.n); }); const unk=[...unkM.values()];
+      const v = { updatedAt:now, rows:p.rows };
+      DHSC[kind] = { lines:[`${p.rows.length} mileage submissions · ${p.rows.filter(r=>r.a).length} marked Manager Approval`,
+        unk.length?`${unk.length} names not on the roster won’t count: ${unk.slice(0,10).map(dhscEsc).join(', ')}${unk.length>10?'…':''}`:'All names matched the roster',
+        'Saved: staff name/email, trip date, approved yes/no — no client initials or addresses.'],
+        apply: async()=>{ await dhscSet(DHSC_KEYS.jf, v); } };
+    }
+  }catch(e){ DHSC[kind] = quiet ? {note:'Manager Scorecard: couldn’t read this file for the scorecard ('+e.message+').'} : {error:e.message}; }
+  finally{ dhscRefresh(); }
+}
+// Saves a staged scorecard preview. Called on its own (TripLog / JotForm) or right after the main
+// Supervision / Pimsy Notes import commits.
+async function dhscSave(kind){
+  const p = DHSC[kind]; if(!p || !p.apply) return;
+  DHSC[kind] = { busy:true }; dhscRefresh();
+  try{
+    await p.apply(); DHSC[kind] = null;
+    // Data Catalog entry only for the stand-alone uploads; Supervision / Notes already record their own.
+    if(kind==='tl'||kind==='jf') recordImport(DHSC_KEYS[kind], {row_count:null});
+    const t=document.createElement('div'); t.textContent=`✓ Manager Scorecard — ${DHSC_LABEL[kind]} saved`; t.style.cssText='position:fixed;top:56px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)'; document.body.appendChild(t); setTimeout(()=>t.remove(),3500);
+  }catch(e){ DHSC[kind] = null; showSaveError(`Manager Scorecard ${DHSC_LABEL[kind]} didn’t save: ${e.message} Upload the file again to retry.`); }
+  dhscRefresh();
+}
+function dhscFile(kind, input){ const f=input.files&&input.files[0]; input.value=''; if(f) dhscSlot(kind, f, false); }
+// Preview block. `rider` = shown under another upload's preview (no buttons of its own).
+function dhscPreview(kind, rider){
+  const p = DHSC[kind]; if(!p) return '';
+  const box = (bg,bd,html) => `<div style="background:${bg};border:1px solid ${bd};border-radius:8px;padding:10px 13px;margin-top:8px;font-size:12px;color:#3e4a78;line-height:1.6">${html}</div>`;
+  if(p.busy) return box('#fff','#e6dfd2','Reading for the Manager Scorecard…');
+  if(p.note) return box('#FFFBEB','#FCD34D', dhscEsc(p.note));
+  if(p.error) return box('#FEE2E2','#FCA5A5', `<b style="color:#7F1D1D">Couldn’t use that file.</b> ${dhscEsc(p.error)}<div style="text-align:right;margin-top:6px"><button class="btn-g" style="font-size:11px" onclick="DHSC['${kind}']=null;dhscRefresh()">Dismiss</button></div>`);
+  return box('#fff','#cdc4b2', p.lines.map(l=>`<div>${rider?'📊 ':'✅ '}${l}</div>`).join('')
+    + (rider ? '' : `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="DHSC['${kind}']=null;dhscRefresh()">Cancel</button><button class="btn-n" style="font-size:11px" onclick="dhscSave('${kind}')">Confirm &amp; Save</button></div>`));
 }
 
 async function readFileSmart(file, onText){
@@ -6985,6 +7461,7 @@ async delSRow(enc){
   slotFileSup(inp){
     const f=inp.files[0]; if(!f) return;
     S._lastFile=f.name;
+    if(/\.xlsx?$/i.test(f.name)) dhscSlot('sup', f, true); else DHSC.sup=null; // Manager Scorecard rides along (Integration tab)
     if(/\.xlsx?$/i.test(f.name)){
       const r=new FileReader();
       r.onload=async e=>{
@@ -7456,6 +7933,7 @@ async delSRow(enc){
   },
   commitSup(){
     const prev=M.prevSup;if(!prev||!prev.matched.length){alert('No matched rows to import.');return;}
+    if(DHSC.sup && DHSC.sup.apply) dhscSave('sup');
     const imp=JSON.parse(JSON.stringify(S.supImport||{}));
     prev.matched.forEach(r=>{
       imp[r.key]=imp[r.key]||{};
@@ -7488,6 +7966,7 @@ async delSRow(enc){
     const f=inp.files[0]; if(!f) return;
     S._lastFile=f.name;
     if(!/\.xlsx?$/i.test(f.name)){ alert('Please upload the .xlsx file directly.'); return; }
+    dhscSlot('notes', f, true); // Manager Scorecard rides along (QA calls + 48-hour review timing)
     const r=new FileReader();
     r.onload=async e=>{
       try{
@@ -7521,6 +8000,7 @@ async delSRow(enc){
   },
   commitNotes(){
     const p = M.prevNotes; if(!p || p.error) return;
+    if(DHSC.notes && DHSC.notes.apply) dhscSave('notes');
     if(p.backfill){
       // Historical backfill — only fills in months that don't already have a real (richer)
       // snapshot from an actual monthly upload. Never downgrades a month that already has
