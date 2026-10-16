@@ -3048,7 +3048,7 @@ function modH(){
           <div>ℹ️ <strong>${rev.noDate}</strong> row${rev.noDate!==1?'s':''} had no Expires On date (not tracked as a deadline, but still counted toward that client's billing-status/purple check)</div>
           ${rev.reassignments&&rev.reassignments.length?`<div style="color:#a07e0a">🔁 <strong>${rev.reassignments.length}</strong> renewal${rev.reassignments.length!==1?'s':''} changing owner — double-check these before applying: ${rev.reassignments.slice(0,10).map(r=>xe(`${r.clientId} (${r.from} → ${r.to})`)).join(', ')}${rev.reassignments.length>10?'…':''}</div>`:''}
         </div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevRen=null;H.om('data');">Cancel</button>${(rev.toImport.length>0||(rev.toUpdate||[]).length>0)?`<button id="renBulkConfirmBtn" class="btn-n" style="font-size:11px" onclick="H.confirmRenBulk()">Apply ${rev.toImport.length+(rev.toUpdate||[]).length} Change${(rev.toImport.length+(rev.toUpdate||[]).length)!==1?'s':''}</button>`:''}</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevRen=null;H.om('data');">Cancel</button>${(rev.toImport.length>0||(rev.toUpdate||[]).length>0)?`<button id="renBulkConfirmBtn" class="btn-n" style="font-size:11px" onclick="H.confirmRenBulk()">Apply ${rev.toImport.length+(rev.toUpdate||[]).length} Change${(rev.toImport.length+(rev.toUpdate||[]).length)!==1?'s':''}</button>`:(rev.retention&&Object.keys(rev.retention).length?`<button id="renBulkConfirmBtn" class="btn-n" style="font-size:11px" onclick="H.confirmRenBulk()" title="No renewal changes in this file — this saves the graduation &amp; fall-off data only">Save graduation &amp; fall-off data</button>`:'')}</div>
       </div>`:''}
       <div style="border-top:1px dashed #cdc4b2;margin-top:12px;padding-top:10px">
         <div style="font-size:11px;color:#7F1D1D;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:8px 10px;line-height:1.6">
@@ -4405,7 +4405,7 @@ async function retHash(id){
 }
 async function saveRetention(byClient){
   try{
-    const ids=Object.keys(byClient||{}); if(!ids.length) return;
+    const ids=Object.keys(byClient||{}); if(!ids.length) return false;
     const rows=await db.get('appdata','key=eq.community_retention');
     let led=null; try{ led=rows&&rows[0]&&rows[0].value?JSON.parse(rows[0].value):null; }catch(e){}
     led=led&&led.clients?led:{clients:{}};
@@ -4419,7 +4419,8 @@ async function saveRetention(byClient){
     led.updatedAt=new Date().toISOString(); led.asof=today; led.firstUpload=led.firstUpload||today;
     const ok=await db.upsert('appdata',{key:'community_retention',value:JSON.stringify(led)},'key');
     if(!ok) throw new Error('save failed');
-  }catch(e){ console.warn('[saveRetention]',e); showSaveError('Renewals saved, but the graduation/fall-off data didn’t — re-upload the Renewals file to retry.'); }
+    return true;
+  }catch(e){ console.warn('[saveRetention]',e); showSaveError('The graduation/fall-off data didn’t save — re-upload the Renewals file to retry.'); return false; }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -8585,7 +8586,14 @@ async delSRow(enc){
   async confirmRenBulk(){
     const rev=M.prevRen;
     const nImport=rev?rev.toImport.length:0, nUpdate=rev?(rev.toUpdate||[]).length:0;
-    if(!rev||(nImport===0&&nUpdate===0)){ if(rev&&rev.retention) await saveRetention(rev.retention); M.prevRen=null;render();return;}
+    if(!rev||(nImport===0&&nUpdate===0)){
+      // No renewal changes — still save the graduation/fall-off ledger (10/16/26), and say so.
+      if(rev&&rev.retention){
+        const btn0=document.getElementById('renBulkConfirmBtn'); if(btn0){btn0.disabled=true;btn0.textContent='Saving…';}
+        const ok0=await saveRetention(rev.retention);
+        if(ok0){ const t=document.createElement('div');t.textContent=`✓ Graduation & fall-off data saved for ${Object.keys(rev.retention).length} clients (no renewal changes)`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3500); }
+      }
+      M.prevRen=null;render();return;}
     const btn=document.getElementById('renBulkConfirmBtn');
     if(btn){btn.disabled=true;btn.textContent='Saving…';}
     const nextRenewals=S.renewals.slice();
