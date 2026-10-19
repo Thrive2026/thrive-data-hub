@@ -2976,22 +2976,24 @@ function modH(){
     </div>
     <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔗 Optum SLA &amp; Disenrollment <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Linkage Hub</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Optum referral-tracker export (.xlsx) — reads ADT Notification Received Date, Follow-Up Within 24 Business Hours (Y/N), Disenrollment Trigger, and Disenrollment Date, aggregates by month, and merges straight into the shared Optum SLA data Linkage Hub already reads live. <strong>You can keep uploading here from now on; Linkage Hub's own "↑ Upload Referral Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance stay manual entry in Linkage Hub — this export has no column for those.</div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Optum referral-tracker export (.xlsx; the de-identified version with a Member ID column works) — fills referrals, cumulative referrals, engaged members, and outreach counts by county, plus ADT discharge follow-up and disenrollment, aggregated by month, and merges straight into the shared Optum SLA data Linkage Hub already reads live. <strong>You can keep uploading here from now on; Linkage Hub's own "↑ Upload Referral Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance stay manual entry in Linkage Hub — this export has no column for those.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileOptum(this)" style="font-size:12px;font-family:inherit">
-      ${M.prevOptum?(M.prevOptum.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevOptum.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(M.prevOptum.months.length===0?`<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#92400E">No rows in ${xe(M.prevOptum.sourceFilename)} had a usable ADT Notification Received Date or Disenrollment Date — nothing to import.</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(()=>{
+      ${M.prevOptum?(M.prevOptum.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevOptum.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(M.prevOptum.months.length===0?`<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#92400E">No member rows found in ${xe(M.prevOptum.sourceFilename)} (each row needs a Member ID or member name) — nothing to import.</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">OK</button></div></div>`:(()=>{
         const parsed = M.prevOptum;
         const monthBlocks = parsed.months.map(mo=>{
           const b = parsed.byMonth[mo];
           const pct = b.followupTotal>0 ? Math.round((b.followupYes/b.followupTotal)*100) : null;
           return `<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
           <div style="font-weight:700;color:#1a2861;margin-bottom:2px">${xe(mo)}</div>
-          <div>${pct!=null?`Discharge follow-up: <strong>${pct}%</strong> (${b.followupYes}/${b.followupTotal})`:'No follow-up rows this month'} · Disenrollments: <strong>${b.disenrolled.length}</strong></div>
+          <div>Referrals: <strong>${b.referrals}</strong> (cumulative ${b.cum_referrals}) · Engaged: <strong>${b.engaged}</strong> · Attempts this month: <strong>${b.outreach_attempts}</strong> · Attempted to date: ${b.outreach_attempted_cum} · Reached to date: ${b.outreach_reached_cum}</div>
+          <div>${pct!=null?`Discharge follow-up: <strong>${pct}%</strong> (${b.followupYes}/${b.followupTotal})`:'No discharge follow-up rows'} · Disenrollments: <strong>${b.disenrolled.length}</strong></div>
         </div>`;
         }).join('');
         return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
-        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Optum SLA (${parsed.dataRowCount} referral row${parsed.dataRowCount!==1?'s':''}, ${parsed.months.length} month${parsed.months.length!==1?'s':''})</div>
+        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — Optum referrals (${parsed.dataRowCount} member${parsed.dataRowCount!==1?'s':''}, ${parsed.months.length} month${parsed.months.length!==1?'s':''})</div>
+        ${parsed.hasAttrCol ? '' : `<div style="font-size:12px;color:#92400E;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:8px 10px;margin-bottom:8px">No attribution date column — members are counted as referred in the batch month: <input type="month" value="${xe(parsed.batchMonth)}" onchange="H.setOptumBatchMonth(this.value)" style="font-size:12px;padding:2px 6px;border:1px solid #cdc4b2;border-radius:4px"> (defaulted to the first outreach month; change it if the batch arrived earlier).</div>`}
         <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks}</div>
-        <div style="font-size:11px;color:#8089a8;margin-top:8px">This merges into whatever's already on file for each month above — existing fields not covered by this export (time-to-assignment, time-to-first-contact, 4-async/1-sync) are left untouched.</div>
+        <div style="font-size:11px;color:#8089a8;margin-top:8px">For each month above this replaces referrals, cumulative referrals, engaged, and the outreach counts, and merges discharge follow-up / disenrollment. Engaged = outcome "Member Is Interested" or Transitioned box checked. Time-to-assignment, time-to-first-contact, and 4-async/1-sync are left untouched.</div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevOptum=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitOptum()">Confirm Import</button></div>
       </div>`;
       })())):''}
@@ -5064,27 +5066,107 @@ function parseOptumSlaWorkbook(sheets, fileName){
   if(cAdt==null || cFollowup==null || cDisenrollDate==null){
     throw new Error('Expected columns not found (ADT Notification Received Date / Follow-Up Within 24 Business Hours / Disenrollment Date) — is this the referral tracker template?');
   }
+  // 10/19/26 — a row counts as a member if it has a Member ID (de-identified export, preferred)
+  // OR a member name (original identified template). Previously name-only, which made the
+  // de-identified file import 0 rows.
   const cFirst = optumSlaCol(idx,'Member Name First'), cLast = optumSlaCol(idx,'Member Name Last');
-  const dataRows = rows.slice(1).filter(r => (cFirst!=null && r[cFirst]!==''&&r[cFirst]!=null) || (cLast!=null && r[cLast]!==''&&r[cLast]!=null));
-  const byMonth = {};
-  const ensure = (mo) => byMonth[mo] || (byMonth[mo] = { followupTotal:0, followupYes:0, disenrolled:[] });
-  dataRows.forEach(r=>{
-    const adtDate = optumSlaParseDate(r[cAdt]);
-    const adtMonth = optumSlaMonthKey(adtDate);
-    if(adtMonth && r[cFollowup]!==''&&r[cFollowup]!=null){
-      const b = ensure(adtMonth);
-      b.followupTotal++;
-      if(optumSlaTruthy(r[cFollowup])) b.followupYes++;
+  const cId = optumSlaCol(idx,'Member ID');
+  const has = (r,c) => c!=null && r[c]!=='' && r[c]!=null;
+  const dataRows = rows.slice(1).filter(r => has(r,cId) || has(r,cFirst) || has(r,cLast));
+
+  // Optional attribution-date column (not in the template yet). Without one, every member
+  // without a date is assigned to the "batch month" — defaulted to the earliest outreach
+  // attempt in the file, adjustable in the preview before confirming.
+  const cAttr = ['Attribution Date','Referral Received Date','Referral Date','Date Attributed','Attributed Date']
+    .map(n=>optumSlaCol(idx,n)).find(c=>c!=null);
+  const cCounty = optumSlaCol(idx,'County');
+  const cTransitioned = optumSlaCol(idx,'Transitioned/Completed Assessment') ?? optumSlaCol(idx,'Tranisitioned/Completed Assessment');
+  const attemptCols = [1,2,3,4].map(a=>({ date: optumSlaCol(idx,`Outreach ${a} Attempt Date`), outcome: optumSlaCol(idx,`Outcome ${a}`) }))
+    .filter(c=>c.date!=null || c.outcome!=null);
+
+  const followup = {}; // ADT month -> {total, yes}
+  const disenrolled = {}; // month -> [{date, trigger}]
+  const members = dataRows.map(r=>{
+    const adtMonth = optumSlaMonthKey(optumSlaParseDate(r[cAdt]));
+    if(adtMonth && has(r,cFollowup)){
+      const b = followup[adtMonth] || (followup[adtMonth]={total:0,yes:0});
+      b.total++; if(optumSlaTruthy(r[cFollowup])) b.yes++;
     }
     const disDate = optumSlaParseDate(r[cDisenrollDate]);
     const disMonth = optumSlaMonthKey(disDate);
-    if(disMonth){
-      const b = ensure(disMonth);
-      b.disenrolled.push({ date: disDate, trigger: cDisenrollTrigger!=null ? r[cDisenrollTrigger] : '' });
-    }
+    if(disMonth) (disenrolled[disMonth] = disenrolled[disMonth]||[]).push({ date: disDate, trigger: cDisenrollTrigger!=null ? r[cDisenrollTrigger] : '' });
+    const attempts = attemptCols.map(c=>{
+      const outcome = c.outcome!=null ? String(r[c.outcome]??'').trim() : '';
+      return { date: optumSlaParseDate(c.date!=null ? r[c.date] : null), outcome: (outcome==='0') ? '' : outcome };
+    }).filter(a=>a.date || a.outcome);
+    return {
+      attrMonth: cAttr!=null ? optumSlaMonthKey(optumSlaParseDate(r[cAttr])) : null,
+      county: cCounty!=null ? (String(r[cCounty]||'').trim().toLowerCase().replace(/\b\w/g,ch=>ch.toUpperCase()) || 'Unknown') : 'Unknown',
+      transitioned: cTransitioned!=null && optumSlaTruthy(r[cTransitioned]),
+      attempts,
+    };
   });
-  const months = Object.keys(byMonth).sort();
-  return { byMonth, months, dataRowCount: dataRows.length, sourceFilename: fileName };
+  const attemptMonths = members.flatMap(m=>m.attempts.map(a=>optumSlaMonthKey(a.date))).filter(Boolean).sort();
+  const defaultBatch = attemptMonths[0] || new Date().toISOString().slice(0,7);
+  return optumAggregate({ members, followup, disenrolled, hasAttrCol: cAttr!=null, batchMonth: defaultBatch,
+    dataRowCount: dataRows.length, sourceFilename: fileName });
+}
+
+// Engaged = connected with the member AND they agreed to services (confirmed by Brandon
+// 10/19/26) — an outcome of "Member Is Interested" (or anything saying "agreed"), or the
+// Transitioned/Completed Assessment box checked. "Reached" = any live contact, including
+// declines and call-back requests.
+const OPTUM_ENGAGED_RE = /(member is interested|agreed)/i;
+const OPTUM_REACHED_RE = /(interested|call ?back|declin|refus|agreed|spoke|connected|reached)/i;
+const OPTUM_BADNUM_RE  = /(out of service|wrong number|disconnected)/i;
+function optumMonthRange(a,b){
+  const out=[]; let [y,m]=a.split('-').map(Number); const [by,bm]=b.split('-').map(Number);
+  while(y<by || (y===by && m<=bm)){ out.push(`${y}-${String(m).padStart(2,'0')}`); m++; if(m>12){m=1;y++;} }
+  return out;
+}
+// Builds the per-month numbers from the parsed member list. Re-run when the batch month is
+// changed in the preview. Referral/engagement/outreach figures are cumulative "as of month-end"
+// except referrals and outreach_attempts, which are that month only.
+function optumAggregate(p){
+  const mem = p.members.map(m=>{
+    const attr = m.attrMonth || p.batchMonth;
+    const firstWith = re => { const a = m.attempts.filter(x=>re.test(x.outcome)).map(x=>optumSlaMonthKey(x.date)||attr).sort(); return a[0]||null; };
+    const attemptedMo = m.attempts.map(x=>optumSlaMonthKey(x.date)||attr).sort()[0] || null;
+    let engagedMo = firstWith(OPTUM_ENGAGED_RE);
+    if(!engagedMo && m.transitioned){ const last = m.attempts.map(x=>optumSlaMonthKey(x.date)).filter(Boolean).sort().pop(); engagedMo = last||attr; }
+    return { ...m, attr, attemptedMo, engagedMo, reachedMo: firstWith(OPTUM_REACHED_RE) || engagedMo, badMo: firstWith(OPTUM_BADNUM_RE) };
+  });
+  const allMonths = [
+    ...mem.map(m=>m.attr), ...mem.flatMap(m=>m.attempts.map(a=>optumSlaMonthKey(a.date))),
+    ...Object.keys(p.followup), ...Object.keys(p.disenrolled),
+  ].filter(Boolean).sort();
+  const months = allMonths.length ? optumMonthRange(allMonths[0], allMonths[allMonths.length-1]) : [];
+  const byMonth = {};
+  months.forEach(mo=>{
+    const upTo = k => k && k<=mo;
+    const counties = {};
+    mem.filter(m=>upTo(m.attr)).forEach(m=>{
+      const c = counties[m.county] || (counties[m.county]={attributed:0,attempted:0,engaged:0});
+      c.attributed++; if(upTo(m.attemptedMo)) c.attempted++; if(upTo(m.engagedMo)) c.engaged++;
+    });
+    const cum = mem.filter(m=>upTo(m.attr)).length;
+    const attemptedCum = mem.filter(m=>upTo(m.attemptedMo)).length;
+    byMonth[mo] = {
+      referrals: mem.filter(m=>m.attr===mo).length,
+      cum_referrals: cum,
+      engaged: mem.filter(m=>upTo(m.engagedMo)).length,
+      outreach_attempts: mem.reduce((n,m)=>n+m.attempts.filter(a=>optumSlaMonthKey(a.date)===mo).length,0),
+      outreach_attempted_cum: attemptedCum,
+      outreach_reached_cum: mem.filter(m=>upTo(m.reachedMo)).length,
+      outreach_not_attempted: cum - attemptedCum,
+      outreach_bad_number_cum: mem.filter(m=>upTo(m.badMo)).length,
+      county_breakdown: counties,
+      followupTotal: p.followup[mo]?.total || 0,
+      followupYes: p.followup[mo]?.yes || 0,
+      disenrolled: p.disenrolled[mo] || [],
+    };
+  });
+  return { ...p, byMonth, months };
 }
 
 // ══════════════════════════════════════════════════════════
@@ -7747,6 +7829,11 @@ async delSRow(enc){
   // Same serialized-write discipline as _plCommitChain/_klipCommitChain above (see the comment
   // above _plCommitChain for the exact race this prevents).
   _optumCommitChain: Promise.resolve(),
+  setOptumBatchMonth(v){
+    if(!M.prevOptum || M.prevOptum.error || !/^\d{4}-\d{2}$/.test(v||'')) return;
+    M.prevOptum = optumAggregate({ ...M.prevOptum, batchMonth: v });
+    modH();
+  },
   commitOptum(){
     if(!M.prevOptum || M.prevOptum.error || !M.prevOptum.months.length) return;
     const parsed = M.prevOptum;
@@ -7775,6 +7862,9 @@ async delSRow(enc){
       const b = parsed.byMonth[mo];
       if(!actuals[mo]) actuals[mo] = {};
       const rec = actuals[mo];
+      ['referrals','cum_referrals','engaged','outreach_attempts','outreach_attempted_cum','outreach_reached_cum',
+       'outreach_not_attempted','outreach_bad_number_cum','county_breakdown'].forEach(k=>{ rec[k] = b[k]; });
+      rec.referral_data_source = `Imported from ${parsed.sourceFilename}, ${importedAt} (${parsed.dataRowCount} members${parsed.hasAttrCol?'':`, batch month ${parsed.batchMonth}`})`;
       if(b.followupTotal>0) rec.sla_discharge_followup_pct = Math.round((b.followupYes/b.followupTotal)*10000)/10000;
       if(b.disenrolled.length>0){
         rec.disenrolled_count = b.disenrolled.length;
