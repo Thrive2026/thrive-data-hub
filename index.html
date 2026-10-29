@@ -9209,6 +9209,10 @@ function dsHideGate(){
   b.style.display='block';
 }
 function dsRelock(){ if(S.editUnlocked){ S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null); } }
+// VIEW ACCESS (Brandon, 10/29/26): org-wide reviewers only, for now. Change this one rule to widen it
+// (e.g. add 'division_director' to let program managers in). Editing is still EDIT_ALLOWLIST.
+const DS_VIEW_ROLES=['org_wide'];
+function dsViewAllowed(reviewer){ return !!reviewer && DS_VIEW_ROLES.includes(String(reviewer.role||'').trim().toLowerCase()); }
 async function dsLookupReviewer(userId){
   try{
     const {data,error}=await dsSb.from('reviewers').select('name,role,email').eq('id',userId).single();
@@ -9244,6 +9248,11 @@ async function dsHandleLogin(){
     try{ await dsSb.auth.signOut(); }catch(e){}
     reset(); return;
   }
+  if(!dsViewAllowed(reviewer)){
+    dsLoginErr('Signed in, but the Data & Staff Hub is limited to org-wide leadership. Contact Brandon if you need access.');
+    try{ await dsSb.auth.signOut(); }catch(e){}
+    reset(); return;
+  }
   document.getElementById('dsLoginPassword').value='';
   reset();
   await dsAfterSignIn(reviewer);
@@ -9261,7 +9270,7 @@ async function dsSignOut(){
   try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
   if(session){
     const reviewer=await dsLookupReviewer(session.user.id);
-    if(reviewer){ await dsAfterSignIn(reviewer); return; }
+    if(reviewer && dsViewAllowed(reviewer)){ await dsAfterSignIn(reviewer); return; }
   }
   dsRelock();
   dsShowGate();
