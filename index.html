@@ -134,6 +134,26 @@ select,input,button,textarea{font-family:inherit}
 </style>
 </head>
 <body>
+<!-- WHOLE-PAGE SIGN-IN (10/29/26): Data & Staff Hub is now behind Supabase Auth like Outcomes.
+     Any Thrive Tools account with a reviewers row can view and upload; roster EDITING is still
+     limited to EDIT_ALLOWLIST via the separate Unlock step on Staff & Settings. -->
+<div id="dsLoginScreen" style="position:fixed;inset:0;z-index:99999;background:#f7f3ec;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Sans',system-ui,sans-serif;">
+  <div style="background:#fff;border:1px solid #dcd6c8;border-radius:12px;padding:32px;max-width:360px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+    <img id="dsLoginLogo" alt="Thrive Peer Recovery Services" style="height:44px;width:auto;display:block;margin-bottom:14px;">
+    <div style="font-family:'Fraunces',serif;font-weight:500;font-size:1.25rem;color:#1a2861;margin-bottom:6px;">Thrive Data &amp; Staff Hub</div>
+    <div id="dsLoginChecking" style="font-size:0.85rem;color:#666;">Checking your sign-in…</div>
+    <div id="dsLoginForm" style="display:none">
+      <div style="font-size:0.85rem;color:#666;margin-bottom:18px;">This is where Thrive's program data and staff roster are uploaded. Sign in with your Thrive Tools account. Contact Brandon if you need access set up.</div>
+      <label style="display:block;font-size:0.8rem;color:#666;margin-bottom:4px;">Email</label>
+      <input id="dsLoginEmail" type="email" autocomplete="username" style="width:100%;padding:8px 10px;border:1px solid #dcd6c8;border-radius:6px;margin-bottom:10px;font-size:0.9rem;box-sizing:border-box;">
+      <label style="display:block;font-size:0.8rem;color:#666;margin-bottom:4px;">Password</label>
+      <input id="dsLoginPassword" type="password" autocomplete="current-password" style="width:100%;padding:8px 10px;border:1px solid #dcd6c8;border-radius:6px;margin-bottom:6px;font-size:0.9rem;box-sizing:border-box;" onkeydown="if(event.key==='Enter')dsHandleLogin()">
+      <div id="dsLoginError" style="display:none;color:#a3311a;font-size:0.8rem;margin-bottom:10px;"></div>
+      <button id="dsLoginBtn" onclick="dsHandleLogin()" style="width:100%;padding:10px;background:#283c8c;color:#fff;border:none;border-radius:6px;font-weight:600;font-size:0.9rem;cursor:pointer;">Sign In</button>
+    </div>
+  </div>
+</div>
+<button id="dsSignOutBtn" onclick="dsSignOut()" style="display:none;position:fixed;bottom:16px;right:16px;z-index:99998;padding:8px 14px;background:#fff;border:1px solid #dcd6c8;border-radius:20px;font-size:0.78rem;color:#666;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.08);">Sign Out</button>
 <div class="shell">
   <nav class="side" id="sidebar"></nav>
   <div style="display:flex;flex-direction:column;min-width:0">
@@ -640,10 +660,39 @@ select,input,button,textarea{font-family:inherit}
 
 const SB_URL = 'https://fussjixekyhwuromauff.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1c3NqaXhla3lod3Vyb21hdWZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3MjMzNzYsImV4cCI6MjA5ODI5OTM3Nn0.3yfRu5LMDlIasvc0cu_GOcXAquji6ZYUkp3dgxk1j2M';
+// UPDATED (10/29/26, appdata RLS hardening step 1): every db call now sends the signed-in user's
+// Supabase session token when there is one (after "Unlock" on Staff & Settings), and the public
+// anon key only when nobody is signed in. Nothing changes for viewers today — the open
+// anon_all_appdata policy still applies — but writes made while signed in are now attributable to
+// a real account, and this hub is ready for the authenticated-only policy. NOTE: the session is
+// kept in memory only (see dsAuthStorage), so it lasts for this page visit. If a request made with
+// the session token is rejected (401/403, e.g. a table whose policy only allows the anon role), it
+// is retried once with the anon key so nothing breaks before every table's policy is verified.
+async function sbAuthToken(){
+  try{
+    if(typeof dsSb==='undefined') return SB_KEY;
+    const {data}=await dsSb.auth.getSession();
+    let s=data&&data.session;
+    if(s && s.expires_at && s.expires_at*1000 < Date.now()+60000){
+      const r=await dsSb.auth.refreshSession();
+      s=r&&r.data&&r.data.session;
+    }
+    return (s&&s.access_token)||SB_KEY;
+  }catch(e){ return SB_KEY; }
+}
+async function sbFetch(url,opts={},extraHeaders={}){
+  const tok=await sbAuthToken();
+  const mk=(t)=>({...opts,headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+t,'Prefer':'return=representation',...extraHeaders}});
+  let r=await fetch(url,mk(tok));
+  if((r.status===401||r.status===403) && tok!==SB_KEY){
+    console.warn('[sbFetch] session token rejected ('+r.status+') for '+url.split('?')[0]+' — retrying with anon key');
+    r=await fetch(url,mk(SB_KEY));
+  }
+  return r;
+}
 const db = {
-  _h(){return{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'return=representation'};},
   async get(table,filter=''){
-    try{const r=await fetch(`${SB_URL}/rest/v1/${table}?${filter}&order=${table==='appdata'?'key':'id'}`,{headers:this._h()});if(!r.ok)throw new Error(await r.text());return await r.json();}
+    try{const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${filter}&order=${table==='appdata'?'key':'id'}`);if(!r.ok)throw new Error(await r.text());return await r.json();}
     catch(e){console.warn('[db.get]',e);return null;}
   },
   async upsert(table,row,onConflict){
@@ -657,22 +706,22 @@ const db = {
     // pass that column name here so the upsert target is unambiguous.
     try{
       const qs = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
-      const r=await fetch(`${SB_URL}/rest/v1/${table}${qs}`,{method:'POST',headers:{...this._h(),'Prefer':'resolution=merge-duplicates,return=representation'},body:JSON.stringify(row)});
+      const r=await sbFetch(`${SB_URL}/rest/v1/${table}${qs}`,{method:'POST',body:JSON.stringify(row)},{'Prefer':'resolution=merge-duplicates,return=representation'});
       if(!r.ok)throw new Error(await r.text());
       return await r.json();
     }
     catch(e){console.warn('[db.upsert]',e);return null;}
   },
   async update(table,id,patch,idCol='id'){
-    try{const r=await fetch(`${SB_URL}/rest/v1/${table}?${idCol}=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:this._h(),body:JSON.stringify(patch)});if(!r.ok)throw new Error(await r.text());return true;}
+    try{const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${idCol}=eq.${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(patch)});if(!r.ok)throw new Error(await r.text());return true;}
     catch(e){console.warn('[db.update]',e);return false;}
   },
   async del(table,id,idCol='id'){
-    try{const r=await fetch(`${SB_URL}/rest/v1/${table}?${idCol}=eq.${encodeURIComponent(id)}`,{method:'DELETE',headers:this._h()});if(!r.ok)throw new Error(await r.text());return true;}
+    try{const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${idCol}=eq.${encodeURIComponent(id)}`,{method:'DELETE'});if(!r.ok)throw new Error(await r.text());return true;}
     catch(e){console.warn('[db.del]',e);return false;}
   },
   async insert(table,row){
-    try{const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:'POST',headers:this._h(),body:JSON.stringify(row)});if(!r.ok)throw new Error(await r.text());return await r.json();}
+    try{const r=await sbFetch(`${SB_URL}/rest/v1/${table}`,{method:'POST',body:JSON.stringify(row)});if(!r.ok)throw new Error(await r.text());return await r.json();}
     catch(e){console.warn('[db.insert]',e);return null;}
   }
 };
@@ -703,7 +752,7 @@ async function loadStaffAliasMap(){
   const map = {};
   S.staff.forEach(s=>{ if(s.fn&&s.ln) map[normAliasName(s.fn+' '+s.ln)] = s.id; });
   try{
-    const r = await fetch(`${SB_URL}/rest/v1/staff_aliases?select=staff_id,alias_norm`,{headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY}});
+    const r = await sbFetch(`${SB_URL}/rest/v1/staff_aliases?select=staff_id,alias_norm`);
     if(r.ok){
       const rows = await r.json();
       rows.forEach(row=>{ if(row.staff_id!=null) map[row.alias_norm] = row.staff_id; });
@@ -729,6 +778,7 @@ function resolveStaffByAlias(rawName){
 // leave you looking at an old cached roster without knowing it. Returns true/false = roster
 // actually came from Supabase, so the Refresh button can tell the truth.
 let ROSTER_STALE=false;
+let SYNC_STATE='checking'; // 'checking' until the first load finishes, then 'live' or 'stale' (10/29/26)
 async function syncFromSupabase(){
   if(SB_URL.includes('YOUR_PROJECT')||SB_KEY.includes('YOUR_ANON'))return false;
   let rosterOk=false;
@@ -801,6 +851,7 @@ async function syncFromSupabase(){
   if(remoteSup){const supMap={};remoteSup.forEach(s=>{supMap[s.key]=s.completed;});S.supOverrides={...(S.supOverrides||{}),...supMap};cacheLocal('supov',S.supOverrides);}
   await loadStaffAliasMap(); // re-populate against the live roster now that S.staff may have changed
   ROSTER_STALE=!rosterOk;
+  SYNC_STATE=rosterOk?'live':'stale';
   render();
   return rosterOk;
 }
@@ -862,11 +913,16 @@ const DIR={
 // (renewals, productivity, linkage, etc.) in localStorage, which fills the browser's ~5 MB quota,
 // so the auth library couldn't even write its session and sign-in failed. The roster unlock only
 // needs a session for this page visit, so it's kept in memory and never touches localStorage.
+// UPDATED (10/29/26, whole-page sign-in): the session now has to survive a reload, or everyone
+// would re-enter their password on every refresh. It is written to localStorage when there's
+// room, falls back to sessionStorage (separate quota) if localStorage is full, and always keeps
+// an in-memory copy, so a full quota can never block sign-in again (the 9/30 failure).
 const _dsAuthMem = {};
+const _dsTry=(fn)=>{ try{ return fn(); }catch(e){ return null; } };
 const dsAuthStorage = {
-  getItem:(k)=> (k in _dsAuthMem ? _dsAuthMem[k] : null),
-  setItem:(k,v)=>{ _dsAuthMem[k]=v; },
-  removeItem:(k)=>{ delete _dsAuthMem[k]; },
+  getItem:(k)=> (k in _dsAuthMem ? _dsAuthMem[k] : (_dsTry(()=>localStorage.getItem(k)) ?? _dsTry(()=>sessionStorage.getItem(k)) ?? null)),
+  setItem:(k,v)=>{ _dsAuthMem[k]=v; let ok=false; try{ localStorage.setItem(k,v); ok=true; }catch(e){} if(!ok){ _dsTry(()=>sessionStorage.setItem(k,v)); } },
+  removeItem:(k)=>{ delete _dsAuthMem[k]; _dsTry(()=>localStorage.removeItem(k)); _dsTry(()=>sessionStorage.removeItem(k)); },
 };
 const dsSb = supabase.createClient(SB_URL, SB_KEY, {auth:{storageKey:'thrive-ds-roster-auth', storage:dsAuthStorage, persistSession:true, autoRefreshToken:false, lock:async(_n,_t,fn)=>await fn()}});
 const EDIT_ALLOWLIST = ['brandonb@thrivepeersupport.com','achuppa@thrivepeersupport.com','sneff@thrivepeersupport.com'];
@@ -2150,8 +2206,10 @@ let S={
 };
 let M={type:null,tab:'hours',prev:null,defMgr:''};
 
-setTimeout(syncFromSupabase,0);
-setTimeout(loadStaffAliasMap,0); // populates immediately from default roster; syncFromSupabase re-populates once live staff data lands
+// UPDATED (10/29/26): the live load now starts from dsAfterSignIn() once the whole-page sign-in
+// is confirmed, so it always runs with the signed-in token (required once appdata is
+// authenticated-only). The alias map still fills from the local default roster right away.
+setTimeout(()=>{ STAFF_ALIAS_MAP={}; S.staff.forEach(s=>{ if(s.fn&&s.ln) STAFF_ALIAS_MAP[normAliasName(s.fn+' '+s.ln)] = s.id; }); },0);
 
 function mostRecentDataMonth(data){
   let best=null,bestDate=null;
@@ -2689,9 +2747,7 @@ function modH(){
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn-g" onclick="H.cm()">Cancel</button><button class="btn-n" id="addStaffBtn" onclick="H.sSt()">Add Staff</button></div>`;}
   else if(M.type==='unlock'){body=`<div style="font-weight:800;font-size:15px;color:#1a2861;margin-bottom:6px">🔒 Unlock Roster Editing</div>
-    <div style="font-size:12px;color:#6b7280;margin-bottom:16px">Only Brandon, Avril, or Sarah can edit the staff roster. Sign in with your Thrive Tools account.</div>
-    <div class="fld"><label class="lbl">Email</label><input class="inp" id="ueEmail" type="email" placeholder="you@thrivepeersupport.com" autocomplete="username"></div>
-    <div class="fld"><label class="lbl">Password</label><input class="inp" id="uePass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')H.unlockEdit()"></div>
+    <div style="font-size:12px;color:#6b7280;margin-bottom:16px">Only Brandon, Avril, or Sarah can edit the staff roster. You're signed in as <b>${(DS_USER&&(DS_USER.name||DS_USER.email))||'—'}</b>. Unlocking lets this account add, move, rename, and deactivate staff until you lock it again or sign out.</div>
     <div id="ueErr" style="display:none;color:#991B1B;font-size:12px;margin-bottom:6px"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn-g" onclick="H.cm()">Cancel</button><button class="btn-n" id="ueBtn" onclick="H.unlockEdit()">Unlock</button></div>`;}
   else if(M.type==='staffNote'){
@@ -3099,9 +3155,9 @@ function renderHdr(){
   const currentRole=ROLES.find(r=>r.key===S.role)||ROLES[0];
   const rBtns=ROLES.map(r=>`<button class="${S.role===r.key?'active':''}" onclick="H.setR('${r.key}')"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${r.color};margin-right:8px;vertical-align:middle"></span>${r.label} <span style="color:#8089a8;font-size:11px">· ${r.sub}</span></button>`).join('');
   const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='catalog'?'Data Catalog':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
-  const hSrc=periodForField('hours'),cSrc=periodForField('caseload');const allDates=[hSrc,cSrc].filter(Boolean).sort();const latest=allDates[allDates.length-1]||S.period;function fmt(d){if(!d)return'No data imported yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
+  const hSrc=periodForField('hours'),cSrc=periodForField('caseload');const allDates=[hSrc,cSrc].filter(Boolean).sort();const latest=allDates[allDates.length-1]||null;/* FIX (10/29/26): was ||S.period, which showed the hard-coded 2026-04-11 default as if it were real data */function fmt(d){if(!d)return'No data imported yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
   document.getElementById('hdr').innerHTML=`
-    <div class="ctx"><div class="where">${wherelabel}</div><span class="pill live">● Live</span></div>
+    <div class="ctx"><div class="where">${wherelabel}</div>${SYNC_STATE==='live'?'<span class="pill live" title="Roster and shared data loaded from Supabase on this visit">● Live</span>':SYNC_STATE==='stale'?'<span class="pill seed" title="Couldn\'t reach Supabase — showing the copy saved in this browser. Use Refresh Staffing Data on Staff &amp; Settings.">● Not live · cached copy</span>':'<span class="pill seed" title="Loading live data from Supabase…">○ Connecting…</span>'}</div>
     <div class="meta" style="position:relative">
       <div style="position:relative">
         <button class="role-btn" onclick="event.stopPropagation();const m=document.getElementById('rm');m.style.display=m.style.display==='block'?'none':'block'">
@@ -7538,37 +7594,22 @@ async delSRow(enc){
   ssS(v){S.setStat=v;renderV();},
   ssD(v){S.setDir=v;if(v&&DIR[v]&&!DIR[v].mgrs.includes(S.setMgr))S.setMgr='';renderV();},
   async unlockEdit(){
-    const email=document.getElementById('ueEmail')?.value.trim();
-    const password=document.getElementById('uePass')?.value;
+    // UPDATED (10/29/26): the page itself now requires sign-in, so Unlock no longer asks for a
+    // password — it checks the account that's already signed in against EDIT_ALLOWLIST. A
+    // non-allowlisted account just gets told no; it is NOT signed out of the page.
     const err=document.getElementById('ueErr');
     const btn=document.getElementById('ueBtn');
-    const showErr=(msg)=>{ if(err){err.textContent=msg;err.style.display='block';} };
+    const showErr=(msg)=>{ if(err){err.textContent=msg;err.style.display='block';} if(btn){btn.disabled=false;btn.textContent='Unlock';} };
     if(err) err.style.display='none';
-    if(!email||!password){ showErr('Enter your email and password.'); return; }
-    if(btn){btn.disabled=true;btn.textContent='Signing in…';}
-    // FIX (9/30): never leave the button stuck — time out after 15s and show what happened.
-    const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('No response from the sign-in server after '+(ms/1000)+'s. Check your connection, close other Thrive Tools tabs, and try again.')),ms))]);
-    let data,error;
-    try{ ({data,error}=await withTimeout(dsSb.auth.signInWithPassword({email,password}),15000)); }
-    catch(e){ error=e; }
-    if(error){
-      showErr('Sign-in failed: '+error.message);
-      if(btn){btn.disabled=false;btn.textContent='Unlock';}
-      return;
-    }
-    let reviewer,rErr;
-    try{ ({data:reviewer,error:rErr}=await withTimeout(dsSb.from('reviewers').select('name,role,email').eq('id',data.user.id).single(),15000)); }
-    catch(e){ rErr=e; }
-    if(rErr && !reviewer){
-      showErr('Signed in, but couldn\'t check roster permissions: '+(rErr.message||rErr));
-      await dsSb.auth.signOut();
-      if(btn){btn.disabled=false;btn.textContent='Unlock';}
-      return;
-    }
-    if(!reviewer||!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())){
-      showErr('Signed in' + (reviewer?.name?(' as '+reviewer.name):'') + ', but this account isn\'t authorized to edit the roster. Contact Brandon.');
-      await dsSb.auth.signOut();
-      if(btn){btn.disabled=false;btn.textContent='Unlock';}
+    if(btn){btn.disabled=true;btn.textContent='Checking…';}
+    let session=null;
+    try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
+    if(!session){ showErr('Your sign-in has expired. Sign in again to continue.'); dsShowGate(); return; }
+    let reviewer=null,rErr=null;
+    try{ ({data:reviewer,error:rErr}=await dsSb.from('reviewers').select('name,email').eq('id',session.user.id).single()); }catch(e){ rErr=e; }
+    if(rErr||!reviewer){ showErr('Couldn\'t check roster permissions: '+((rErr&&rErr.message)||rErr||'no reviewer profile')); return; }
+    if(!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())){
+      showErr('Signed in as '+(reviewer.name||reviewer.email)+', but this account isn\'t authorized to edit the roster. Contact Brandon.');
       return;
     }
     S.editUnlocked=true; S.editUser=reviewer.name;
@@ -7576,7 +7617,6 @@ async delSRow(enc){
     M.type=null; render();
   },
   async lockEdit(){
-    await dsSb.auth.signOut();
     S.editUnlocked=false; S.editUser=null;
     sv('editUnlocked',false); sv('editUser',null);
     renderV();
@@ -9142,27 +9182,84 @@ Object.assign(H, {
 
 document.addEventListener('click',e=>{const rm=document.getElementById('rm');if(rm&&!e.target.closest('#rm')&&!e.target.closest('.role-btn'))rm.style.display='none';});
 
-// NEW (9/11, identity/access standardization phase 1): a remembered editUnlocked=true in this
-// browser's localStorage no longer means anything on its own now that unlocking is real
-// Supabase Auth — it needs a live, allowlisted session behind it. On load, if this browser
-// remembers being unlocked, re-check that the Supabase Auth session is still valid and still
-// belongs to an allowlisted reviewer; if not (session expired, signed out elsewhere, or this is
-// a different browser/device that never actually signed in), silently re-lock instead of
-// trusting the stale flag. Mirrors Director Hub's dhInit() session-restore check.
-(async function dsAuthInit(){
-  if(!S.editUnlocked) return;
-  const {data}=await dsSb.auth.getSession();
-  if(!data||!data.session){ S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null); renderV(); return; }
-  const {data:reviewer,error:rErr}=await dsSb.from('reviewers').select('name,email').eq('id',data.session.user.id).single();
-  if(rErr||!reviewer||!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())){
-    S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null);
-    await dsSb.auth.signOut();
-    renderV();
-    return;
+// WHOLE-PAGE SIGN-IN (10/29/26) — replaces dsAuthInit(). Mirrors Outcomes' gate: Supabase Auth,
+// then the reviewers row for the signed-in user; any reviewer may use the hub. Nothing is loaded
+// from Supabase until this passes, and then syncFromSupabase() runs with the signed-in token.
+// A remembered editUnlocked=true is still re-checked against EDIT_ALLOWLIST (was dsAuthInit).
+const DS_LOGO="data:image/png;base64,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";
+let DS_USER=null;
+_dsTry(()=>{ document.getElementById('dsLoginLogo').src=DS_LOGO; });
+function dsLoginErr(msg){ const el=document.getElementById('dsLoginError'); if(!el)return; el.textContent=msg||''; el.style.display=msg?'block':'none'; }
+function dsShowGate(){
+  const g=document.getElementById('dsLoginScreen'); if(g) g.style.display='flex';
+  document.getElementById('dsLoginChecking').style.display='none';
+  document.getElementById('dsLoginForm').style.display='block';
+  document.getElementById('dsSignOutBtn').style.display='none';
+  setTimeout(()=>{ const e=document.getElementById('dsLoginEmail'); if(e) e.focus(); },50);
+}
+function dsHideGate(){
+  document.getElementById('dsLoginScreen').style.display='none';
+  const b=document.getElementById('dsSignOutBtn');
+  b.textContent='Signed in as '+((DS_USER&&(DS_USER.name||DS_USER.email))||'—')+' · Sign Out';
+  b.style.display='block';
+}
+function dsRelock(){ if(S.editUnlocked){ S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null); } }
+async function dsLookupReviewer(userId){
+  try{
+    const {data,error}=await dsSb.from('reviewers').select('name,role,email').eq('id',userId).single();
+    return (error||!data)?null:data;
+  }catch(e){ return null; }
+}
+async function dsAfterSignIn(reviewer){
+  DS_USER=reviewer;
+  // Keep a remembered roster unlock only if this account is still allowlisted.
+  if(S.editUnlocked){
+    if(!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())) dsRelock();
+    else if(reviewer.name && reviewer.name!==S.editUser){ S.editUser=reviewer.name; sv('editUser',reviewer.name); }
   }
-  // Session is valid and still allowlisted — keep the remembered name in sync with the reviewers
-  // table in case it was updated there since this browser last unlocked.
-  if(reviewer.name && reviewer.name!==S.editUser){ S.editUser=reviewer.name; sv('editUser',reviewer.name); }
+  dsHideGate();
+  render();
+  try{ await syncFromSupabase(); }catch(e){ console.warn('[dsAfterSignIn] sync failed',e); }
+}
+async function dsHandleLogin(){
+  const email=(document.getElementById('dsLoginEmail').value||'').trim();
+  const password=document.getElementById('dsLoginPassword').value;
+  const btn=document.getElementById('dsLoginBtn');
+  dsLoginErr('');
+  if(!email||!password){ dsLoginErr('Enter your email and password.'); return; }
+  btn.disabled=true; btn.textContent='Signing in…';
+  const reset=()=>{ btn.disabled=false; btn.textContent='Sign In'; };
+  const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('No response from the sign-in server after '+(ms/1000)+'s. Check your connection and try again.')),ms))]);
+  let data,error;
+  try{ ({data,error}=await withTimeout(dsSb.auth.signInWithPassword({email,password}),15000)); }catch(e){ error=e; }
+  if(error){ dsLoginErr('Sign-in failed: '+error.message); reset(); return; }
+  const reviewer=await dsLookupReviewer(data.user.id);
+  if(!reviewer){
+    dsLoginErr('Signed in, but no reviewer profile is set up for this account. Contact Brandon to be added to the reviewers table.');
+    try{ await dsSb.auth.signOut(); }catch(e){}
+    reset(); return;
+  }
+  document.getElementById('dsLoginPassword').value='';
+  reset();
+  await dsAfterSignIn(reviewer);
+}
+async function dsSignOut(){
+  try{ await dsSb.auth.signOut(); }catch(e){}
+  DS_USER=null; dsRelock();
+  const e=document.getElementById('dsLoginEmail'), p=document.getElementById('dsLoginPassword');
+  if(e) e.value=''; if(p) p.value='';
+  dsLoginErr('');
+  dsShowGate();
+}
+(async function dsGateInit(){
+  let session=null;
+  try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
+  if(session){
+    const reviewer=await dsLookupReviewer(session.user.id);
+    if(reviewer){ await dsAfterSignIn(reviewer); return; }
+  }
+  dsRelock();
+  dsShowGate();
 })();
 
 render();
