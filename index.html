@@ -832,7 +832,12 @@ async function syncFromSupabase(){
     // Raw note pool — same "server is authoritative, merge session on top" pattern as history
     // above. This is what makes weekly delta uploads safe: it's the accumulated memory a new
     // upload gets merged into, rather than each upload starting from a blank slate.
-    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;cacheLocal('linkageNotesRaw',S.linkageNotesRaw);}
+    // 10/29/26: NOT cached to this browser's localStorage (every other key above is). The pool holds every
+    // org-wide note row -- client #, insurance, provider -- so it shouldn't sit on whatever computer
+    // opened this page, and at several MB it would also eat the ~5 MB localStorage quota the 9/30
+    // sign-in fix depends on. It's held in memory for this visit only; sv()'s SV_SEEN guard already
+    // refuses to save it if the live copy didn't load.
+    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;}
   }
   const remoteTasks=await db.get('tasks');
   if(remoteTasks){
@@ -1110,7 +1115,7 @@ async function svServerValue(key){
   return (rows[0]&&rows[0].value!=null)?rows[0].value:null;
 }
 async function sv(k,v){
-  try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
+  if(k!=='linkageNotesRaw'){try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}} // raw notes pool stays out of localStorage (10/29/26)
   const key=SHARED_KEYS[k];
   if(!(key&&typeof db!=='undefined'&&SB_KEY.length>50))return true;
   const body=JSON.stringify(v);
@@ -2201,7 +2206,7 @@ let S={
   // Note #, which is unique per note) and recompute totals from the full accumulated set,
   // instead of a new upload's rows replacing the whole month and silently losing everything
   // an earlier upload contributed. See commitNotes() / mergeLinkageMonthRaw().
-  linkageNotesRaw:lv('linkageNotesRaw',{}),
+  linkageNotesRaw:(function(){try{localStorage.removeItem('ths_linkageNotesRaw');}catch(e){}return {};})(), // 10/29/26: never restored from (and old copies cleared out of) localStorage -- see the load code
   impreg:lv('impreg',{}),
 };
 let M={type:null,tab:'hours',prev:null,defMgr:''};
