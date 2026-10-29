@@ -54,10 +54,12 @@ Each post-cutover month in `linkage_history` also gets `nonBk.converted` and `no
 - Redeploying with new people added to `SDEF` only adds new IDs to the live roster. It never overwrites someone who's already there. To correct an existing person, edit them in the app, or use a one-off migration script for bulk fixes.
 - Name matching for imports goes through `normAliasName()` and the Supabase `staff_aliases` table. Bracketed notes such as "(HOLD)" are stripped automatically. A true nickname mismatch needs a `staff_aliases` entry.
 - If the Linkage Hub shows "—" for Transitioned after an upload, the file was probably missing the clinical notes. Check that it was the org-wide export.
+- `linkage_notes_raw` holds every org-wide note row (client #, insurance, provider) and grows each month. It's kept out of the browser's local storage on purpose. Other pages shouldn't load all of `appdata` at once (Community Hub and Provider Match now skip or exclude it). Any new page should request only the keys it needs.
 
 ## Links that point here
 
 - The `thrive-hub` landing page (Data & Staff Hub tile)
 - The Director Hub
 - The BH Linkage Hub (Optum referral upload link)
+
 
