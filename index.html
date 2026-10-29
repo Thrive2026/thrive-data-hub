@@ -6935,14 +6935,56 @@ function olRowsToObjects(rows){
 // relaying data Outcomes Dashboard owns), merges this upload's months in, and writes it
 // straight back. Safe to re-run: ledgerUpsertMonth() overwrites by pk+month, so uploading the
 // same or an overlapping month again never double-counts.
-async function olMergeNotesIntoProgramLedger(objRows){
-  const rows = await db.get('appdata', 'key=eq.program_ledger');
-  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}, clientSetsCurrent:{}};
-  if(rows && rows[0] && rows[0].value){
-    try{ ledger = JSON.parse(rows[0].value); }catch(e){}
+// FIX (10/29/26) — ROOT CAUSE of "Program Hub not pulling data past July 2026."
+// The month window used to be anchored ONLY on the newest month already in the ledger
+// (olLedgerMaxMonth). olParseNotes() then drops every note outside that window. Once the ledger's
+// newest month was Jul 26, every later upload was parsed against Aug 25–Jul 26, so all Aug/Sep/Oct
+// notes were silently discarded — and the window could never move forward, because only months
+// inside it ever get written. Client sets (not window-filtered) kept updating, which is why
+// clientSetsCurrent looked fresh while months stayed frozen. The window now ends at whichever is
+// later: the ledger's newest month or the newest Service Date in THIS file.
+function olFileMaxServiceDate(objRows){
+  let maxD = null;
+  for (const r of objRows) {
+    const v = r['Service Date'];
+    const d = v instanceof Date ? v : (v ? new Date(v) : null);
+    if (d && !isNaN(d) && (!maxD || d > maxD)) maxD = d;
   }
+  return maxD;
+}
+// FIX (10/29/26) — program_ledger is one shared JSON row written by BOTH the Notes bridge and the
+// Demographics bridge (and by Outcomes Dashboard's own import). Each does read -> merge -> write.
+// (1) Serialize this hub's two writers so back-to-back uploads can't race and erase each other
+// (same fix as _plCommitChain, 9/22/26). (2) If the read fails or the row can't be parsed, REFUSE
+// to write — the old code fell back to an empty ledger and would have overwritten every month and
+// client set in Supabase with just this one upload.
+let _olLedgerChain = Promise.resolve();
+function olLedgerSerialized(fn){
+  const p = _olLedgerChain.then(fn, fn);
+  _olLedgerChain = p.catch(()=>{});
+  return p;
+}
+async function olReadProgramLedger(){
+  const rows = await db.get('appdata', 'key=eq.program_ledger');
+  if (!rows) throw new Error('Could not read program_ledger from Supabase — nothing was written.');
+  if (!rows.length) return {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}, clientSetsCurrent:{}};
+  const raw = rows[0].value;
+  let ledger;
+  try { ledger = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch(e) { ledger = null; }
+  if (!ledger || typeof ledger !== 'object' || !ledger.months) throw new Error('program_ledger in Supabase could not be parsed — nothing was written.');
+  ledger.clientsSeen = ledger.clientsSeen || {};
+  return ledger;
+}
+function olMergeNotesIntoProgramLedger(objRows){
+  return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows));
+}
+async function _olMergeNotesIntoProgramLedgerNow(objRows){
+  const ledger = await olReadProgramLedger();
   if (!ledger.clientSetsCurrent) ledger.clientSetsCurrent = {};
-  const trendMonths = olComputeTrendMonths(olLedgerMaxMonth(ledger));
+  const ledgerMax = olLedgerMaxMonth(ledger);
+  const fileMax = olFileMaxServiceDate(objRows);
+  const anchor = (fileMax && (!Object.keys(ledger.months||{}).length || fileMax > ledgerMax)) ? fileMax : ledgerMax;
+  const trendMonths = olComputeTrendMonths(anchor);
   const parsed = olParseNotes(objRows, trendMonths);
   Object.entries(parsed.progs).forEach(([pk, p]) => {
     Object.keys(p.mSessions||{}).forEach(month => {
@@ -7075,12 +7117,11 @@ function olParseDemographics(rows) {
 // Safe to re-run: wholesale-overwrites clientRosterCurrent[pk] on every upload — this file is a
 // fresh full all-time snapshot every time, not a delta, so overwriting (not merging) is correct
 // here, same convention as clientSetsCurrent's own "most recent upload wins" rule above.
-async function olMergeDemographicsIntoProgramLedger(parsed) {
-  const rows = await db.get('appdata', 'key=eq.program_ledger');
-  let ledger = {months:{}, clientsSeen:{}, legacyDivisions:{}, ucodeMonths:{}, clientSetsCurrent:{}};
-  if (rows && rows[0] && rows[0].value) {
-    try { ledger = JSON.parse(rows[0].value); } catch(e) {}
-  }
+function olMergeDemographicsIntoProgramLedger(parsed) {
+  return olLedgerSerialized(() => _olMergeDemographicsIntoProgramLedgerNow(parsed));
+}
+async function _olMergeDemographicsIntoProgramLedgerNow(parsed) {
+  const ledger = await olReadProgramLedger();
   if (!ledger.clientRosterCurrent) ledger.clientRosterCurrent = {};
   Object.entries(parsed.progs).forEach(([pk, p]) => {
     ledger.clientRosterCurrent[pk] = {
@@ -8212,7 +8253,7 @@ async delSRow(enc){
         }
       }).catch(err=>{
         console.error('[olMergeNotesIntoProgramLedger]', err);
-        showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger hit an error — see console.');
+        showSaveError('Linkage/Courts imported fine, but the Outcomes Dashboard ledger was not updated: ' + (err && err.message || err));
       });
     }
     // Clinical Goals + Linkage U-codes — moved from Director Hub 9/22/26, computed off this SAME
@@ -8281,7 +8322,7 @@ async delSRow(enc){
       }
     }).catch(err=>{
       console.error('[olMergeDemographicsIntoProgramLedger]', err);
-      showSaveError('Importing the client roster hit an error — see console.');
+      showSaveError('Importing the client roster hit an error: ' + (err && err.message || err));
     });
   },
   // Same serialized-write pattern as _plCommitChain/_klipCommitChain — see the comment on
