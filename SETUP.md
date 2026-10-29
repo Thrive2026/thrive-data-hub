@@ -45,8 +45,9 @@ Each post-cutover month in `linkage_history` also gets `nonBk.converted` and `no
 
 ## Who can do what
 
-- **Viewing:** anyone with the link. There's no sign-in to view (an open item; see the ecosystem tracker).
-- **Editing the roster:** click **Unlock Roster Editing** and sign in. Only Brandon, Avril and Sarah can unlock it. The allowlist is `EDIT_ALLOWLIST` in `index.html`. The sign-in lasts for that page visit only.
+- **Viewing:** the whole page requires sign-in (added 10/29/26). Only org-wide reviewers (`reviewers.role = org_wide`) can get in (Brandon, 10/29/26; change `DS_VIEW_ROLES` in `index.html` to widen it). Nothing loads from Supabase until then. The sign-in is held in memory, so it lasts for that page visit only, and reloading asks again.
+- **Editing the roster:** after signing in, click **Unlock Roster Editing**. It checks the signed-in account against `EDIT_ALLOWLIST` in `index.html` (Brandon, Avril, Sarah Neff). No second password is needed.
+- **Data requests** use the signed-in person's own login rather than the public key, so the hub is ready for the appdata lockdown.
 - **Crisis Center staff** are view-only here. Their records are edited in the Crisis Center hub (decision 9/23/26).
 
 ## Gotchas
