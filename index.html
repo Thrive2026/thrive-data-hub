@@ -6343,7 +6343,7 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     caresource_touched: nonBkCaresourceClients.size,
     outreach_contacts: nonBkOutreach,
     billing_notes_flagged: nonBkUCodeFlagged,
-    conversion_rate: null,
+    conversion_rate: null, // real figure now lives in linkage_data.nonBkSinceCutover (10/29/26) — needs cross-month data
   };
   const pipeline = [
     {stage:'Approached', code:'U1+U2+U3+U4', count:approached, rate:null, target:null, status:null},
@@ -6417,7 +6417,8 @@ function computeLinkageMonthFromRows(inMonth, targetY, targetM){
     communityTransition: [],
     weekly, period: periodLabel, periodKey, _rowCount: linkageRows.length,
     _partial: isPartial, _dataThrough: partialThrough, _dataThroughISO: partialThroughISO,
-    _unavailable: ['Community Transition / LOS table', 'All Other Medicaid conversion rate (no distinct Conversion note type in this export)'],
+    // Conversion is computed across months in computeNonBkConversions() at commit time, not here.
+    _unavailable: ['Community Transition / LOS table'],
   };
 }
 // Reads a raw Pimsy Notes export into the same linkage_data shape parseLinkageDashboardWorkbook
@@ -6534,6 +6535,100 @@ function mergeLinkageMonthRaw(periodKey, incomingPool){
   const snap = computeLinkageMonthFromRows(rowObjs, y, (m-1)); // periodKey month is 1-indexed, computeLinkageMonthFromRows wants 0-indexed
   delete snap._rowCount;
   return {snap, mergedPool};
+}
+// ── All Other Medicaid CONVERSION (added 10/29/26, per Brandon) ─────────────────────────────
+// Conversion = a non-Buckeye client Linkage touched who then shows up in clinical care, i.e. has
+// a note billed H0001 (AOD assessment), 90791 (diagnostic eval), or any other clinical code. The
+// "clinical code" test is deliberately the SAME one Clinical Goals already uses to decide a row is
+// clinical work (parseClinicalNotesExport's looksClinical: any CLINICAL_RATE_TABLE code, or CPST),
+// plus H0001 — so "clinical" means one thing across the ecosystem, and adding a code to
+// CLINICAL_RATE_TABLE automatically counts it here too. Label on Linkage Hub is "Transitioned",
+// matching the Optum section's "Transitioned/Completed Assessment" wording for the same idea.
+//
+// Why this is NOT inside computeLinkageMonthFromRows: that function only ever sees one month, and a
+// conversion crosses months (touched in July, assessed in August). It also fixes the double-count
+// in "Clients Touched": summing each month's unique count counted a client once per month they
+// appeared; this counts each person once across the whole post-cutover period.
+//
+// Rules:
+//   - Eligible clients = non-Buckeye clients with a Linkage row on/after LINKAGE_CUTOVER_ISO.
+//   - Converted = has a conversion-code note (any payer, any staff) ON OR AFTER the day of their
+//     first post-cutover Linkage touch. Counted once, credited to the month of that first clinical note.
+//   - Already in clinical care = had a conversion-code note BEFORE their first Linkage touch. These
+//     weren't converted by Linkage, so they're excluded from the rate's denominator and reported
+//     separately. Limited to the history in linkage_notes_raw (however far back uploads go).
+//   - Rate = converted ÷ (touched − already in clinical care).
+// Reads the org-wide raw pool (linkage_notes_raw stores EVERY row in a month, not just Linkage
+// rows, which is why clinical notes are visible here at all).
+const LINKAGE_CUTOVER_ISO = '2026-07-01';
+function lkIsConversionCode(code){
+  const c = String(code||'');
+  if(/H0001/i.test(c)) return true;
+  if(Object.keys(CLINICAL_RATE_TABLE).some(k=>c.includes(k))) return true;
+  return /cpst/i.test(c);
+}
+function lkConversionCodeLabel(code){
+  const c = String(code||'');
+  if(/H0001/i.test(c)) return 'H0001';
+  if(c.includes('90791')) return '90791';
+  return 'Other clinical';
+}
+function computeNonBkConversions(rawPoolByMonth){
+  const cutover = new Date(LINKAGE_CUTOVER_ISO+'T00:00:00Z');
+  const firstTouch = {}, caresource = {}, clinicalDates = {};
+  Object.values(rawPoolByMonth||{}).forEach(pool=>{
+    Object.values(pool||{}).forEach(r=>{
+      const row = {date:new Date(r.d), by:r.b, code:r.c, ins:r.i, client:r.cl, div:r.v};
+      const id = row.client;
+      if(id==null || id==='' || isNaN(row.date)) return;
+      // Conversion evidence: any non-Linkage row with a clinical code (a Linkage row would never
+      // legitimately carry 90791/H0001, but excluding it keeps a mis-coded peer note from
+      // "converting" its own client).
+      if(!lkIsLinkageRow(row) && lkIsConversionCode(row.code)){
+        (clinicalDates[id] = clinicalDates[id] || []).push({date:row.date, code:lkConversionCodeLabel(row.code)});
+      }
+      if(lkIsLinkageRow(row) && !lkIsBKRow(row) && row.date>=cutover){
+        if(!firstTouch[id] || row.date<firstTouch[id]) firstTouch[id] = row.date;
+        if(/caresource/i.test(String(row.ins||''))) caresource[id] = true;
+      }
+    });
+  });
+  const monthKey = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().split('T')[0];
+  const byMonth = {}; const bump = (k,f)=>{ byMonth[k] = byMonth[k] || {touched_new:0, converted:0}; byMonth[k][f]++; };
+  let converted = 0, alreadyClinical = 0, caresourceConverted = 0, daysSum = 0;
+  const byCode = {'H0001':0, '90791':0, 'Other clinical':0};
+  Object.entries(firstTouch).forEach(([id, touch])=>{
+    bump(monthKey(touch), 'touched_new');
+    const dates = (clinicalDates[id]||[]).slice().sort((a,b)=>a.date-b.date);
+    // Same calendar day as the first touch counts as "after" — a same-day bedside referral and
+    // intake assessment is the best-case conversion, not prior care.
+    const touchDay = Date.UTC(touch.getUTCFullYear(), touch.getUTCMonth(), touch.getUTCDate());
+    if(dates.some(x=>x.date.getTime() < touchDay)){ alreadyClinical++; return; }
+    const first = dates.find(x=>x.date.getTime() >= touchDay);
+    if(!first) return;
+    converted++; byCode[first.code]++;
+    if(caresource[id]) caresourceConverted++;
+    daysSum += Math.round((first.date.getTime()-touchDay)/86400000);
+    bump(monthKey(first.date), 'converted');
+  });
+  const touched = Object.keys(firstTouch).length;
+  const eligible = touched - alreadyClinical;
+  return {
+    byMonth,
+    sinceCutover: {
+      cutover: LINKAGE_CUTOVER_ISO,
+      unique_touched: touched,
+      caresource_touched: Object.keys(caresource).length,
+      already_clinical: alreadyClinical,
+      eligible,
+      converted,
+      caresource_converted: caresourceConverted,
+      conversion_rate: eligible>0 ? Math.round((converted/eligible)*1000)/1000 : null,
+      avg_days_to_conversion: converted ? Math.round(daysSum/converted) : null,
+      converted_by_code: byCode,
+      computedAt: new Date().toISOString(),
+    },
+  };
 }
 // One-time bulk historical backfill from the OLD Linkage Dashboard workbook's Weekly Trends
 // tab — this is the one real source of pre-pipeline history (confirmed against a real file:
@@ -8165,7 +8260,8 @@ async delSRow(enc){
     let lkSkipped = 0;
     if(lkMonthCount){
       S.linkageData = {...p.linkage, importedAt:new Date().toISOString()};
-      sv('linkageData', S.linkageData);
+      // (sv('linkageData') moved below the month loop — it now also carries nonBkSinceCutover,
+      // which needs the fully merged raw pool to compute.)
       S.linkageHistory = {...(S.linkageHistory||{})};
       S.linkageNotesRaw = {...(S.linkageNotesRaw||{})};
       const rawByMonth = (p.linkage && p.linkage.rawRowsByMonth) || {};
@@ -8192,6 +8288,21 @@ async delSRow(enc){
         S.linkageHistory[key] = {...mergedSnap, importedAt:new Date().toISOString()};
         S.linkageNotesRaw[key] = mergedPool;
       });
+      // All Other Medicaid conversion + de-duplicated touched counts (see computeNonBkConversions).
+      // Computed from the WHOLE merged raw pool, every month, so a client touched in one month and
+      // assessed in a later one is caught. Per-month `converted`/`touched_new` are written onto
+      // each post-cutover month's nonBk so they sum correctly (each client lands in exactly one
+      // month for each); the period-level de-duplicated totals ride on linkage_data.
+      try{
+        const conv = computeNonBkConversions(S.linkageNotesRaw);
+        Object.keys(S.linkageHistory).filter(k=>k>=LINKAGE_CUTOVER_ISO).forEach(k=>{
+          const mo = S.linkageHistory[k]; if(!mo || !mo.nonBk) return;
+          const bm = conv.byMonth[k] || {touched_new:0, converted:0};
+          S.linkageHistory[k] = {...mo, nonBk:{...mo.nonBk, converted:bm.converted, touched_new:bm.touched_new}};
+        });
+        S.linkageData.nonBkSinceCutover = conv.sinceCutover;
+      }catch(err){ console.warn('[computeNonBkConversions]', err); }
+      sv('linkageData', S.linkageData);
       sv('linkageHistory', S.linkageHistory);
       sv('linkageNotesRaw', S.linkageNotesRaw);
     }
