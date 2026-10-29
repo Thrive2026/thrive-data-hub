@@ -17,7 +17,6 @@
 <meta charset="UTF-8">
 <title>Thrive Data & Staff Hub</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -873,8 +872,8 @@ const dsSb = supabase.createClient(SB_URL, SB_KEY, {auth:{storageKey:'thrive-ds-
 const EDIT_ALLOWLIST = ['brandonb@thrivepeersupport.com','achuppa@thrivepeersupport.com','sneff@thrivepeersupport.com'];
 function editLocked(){return !S.editUnlocked;}
 const COMMUNITY_MGRS=['Brian','Cara','John','Luke'];
-// Staff & Settings editable scope: all 4 program divisions, plus Crisis Center (new 8/11, no
-// dedicated hub yet — see MGR.David above). Verified directly in each hub's own source that
+// Staff & Settings scope: all 4 program divisions, plus Crisis Center for viewing only — Crisis
+// Center records are edited in the Crisis Center hub (see CC_OWNED_MSG / isCCOwned, 9/23/26). Verified directly in each hub's own source that
 // Community, Courts, Hospital, and Linkage all read/write the SAME shared Supabase key
 // ('staff') for roster data — so an edit made here reflects everywhere immediately.
 const SETTINGS_MGRS=['Brian','Cara','John','Luke','Rachel','Jessica','Angelica','Debra','David'];
@@ -7214,7 +7213,7 @@ const H={
 // removals that "didn't stick." Now awaits the save, rolls back the optimistic UI update and
 // shows a visible error if it fails, and only reports success once Supabase actually has it.
 async tgS(id){
-  if(editLocked()){showSaveError('Roster editing is locked — unlock it with a director/Brandon passcode first.');return;}
+  if(editLocked()){showSaveError('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');return;}
   const prevStaff=S.staff;
   const base=await freshStaff();
   // GUARD (9/10): if this id belongs to more than one row (a data-entry duplicate — see the
@@ -7268,7 +7267,7 @@ async tgS(id){
 // ever available on an already-Inactive row (an Active person can't be deleted outright,
 // Deactivate first), gated behind a confirm that spells out how this differs from Deactivate.
 async delS(id){
-  if(editLocked()){showSaveError('Roster editing is locked — unlock it with a director/Brandon passcode first.');return;}
+  if(editLocked()){showSaveError('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');return;}
   const prevStaff=S.staff;
   const base=await freshStaff();
   // GUARD (9/10): same reasoning as the guard in tgS() above — filter(s=>s.id!==id) would delete
@@ -7311,7 +7310,7 @@ async delS(id){
 // a refresh rather than guessing — silently acting on the wrong row is the one thing this must
 // never do.
 async tgSRow(enc){
-  if(editLocked()){showSaveError('Roster editing is locked — unlock it with a director/Brandon passcode first.');return;}
+  if(editLocked()){showSaveError('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');return;}
   let target;
   try{target=decRow(enc);}catch(e){showSaveError('Could not read that row — refresh the page and try again.');return;}
   const prevStaff=S.staff;
@@ -7358,7 +7357,7 @@ async tgSRow(enc){
   renderV();
 },
 async delSRow(enc){
-  if(editLocked()){showSaveError('Roster editing is locked — unlock it with a director/Brandon passcode first.');return;}
+  if(editLocked()){showSaveError('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');return;}
   let target;
   try{target=decRow(enc);}catch(e){showSaveError('Could not read that row — refresh the page and try again.');return;}
   const prevStaff=S.staff;
@@ -7401,7 +7400,7 @@ async delSRow(enc){
   // write failed, it silently didn't. Now awaits the save and rolls the field back with a
   // visible error if it fails, so a failed save is never mistaken for a successful one.
   async upS(id,field,value){
-    if(editLocked()){showSaveError('Roster editing is locked — unlock it with a director/Brandon passcode first.');renderV();return;}
+    if(editLocked()){showSaveError('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');renderV();return;}
     const prevStaff=S.staff;
     const base=await freshStaff();
     const staff=base.find(s=>s.id===id)||S.staff.find(s=>s.id===id);
@@ -8767,7 +8766,7 @@ async delSRow(enc){
   // (and reopens the modal instead of losing what was typed) with a visible error on failure,
   // and blocks a duplicate Pimsy ID outright instead of silently overwriting that person's row.
   async sSt(){
-    if(editLocked()){alert('Roster editing is locked — unlock it with a director/Brandon passcode first.');return;}
+    if(editLocked()){alert('Roster editing is locked — click "Unlock Roster Editing" and sign in as Brandon, Avril, or Sarah first.');return;}
     const id=parseInt(document.getElementById('si')?.value);
     const fn=document.getElementById('sf')?.value.trim();
     const ln=document.getElementById('sl')?.value.trim();
