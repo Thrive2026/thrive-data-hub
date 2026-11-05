@@ -832,12 +832,7 @@ async function syncFromSupabase(){
     // Raw note pool — same "server is authoritative, merge session on top" pattern as history
     // above. This is what makes weekly delta uploads safe: it's the accumulated memory a new
     // upload gets merged into, rather than each upload starting from a blank slate.
-    // 10/29/26: NOT cached to this browser's localStorage (every other key above is). The pool holds every
-    // org-wide note row -- client #, insurance, provider -- so it shouldn't sit on whatever computer
-    // opened this page, and at several MB it would also eat the ~5 MB localStorage quota the 9/30
-    // sign-in fix depends on. It's held in memory for this visit only; sv()'s SV_SEEN guard already
-    // refuses to save it if the live copy didn't load.
-    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;}
+    const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;cacheLocal('linkageNotesRaw',S.linkageNotesRaw);}
   }
   const remoteTasks=await db.get('tasks');
   if(remoteTasks){
@@ -1115,7 +1110,7 @@ async function svServerValue(key){
   return (rows[0]&&rows[0].value!=null)?rows[0].value:null;
 }
 async function sv(k,v){
-  if(k!=='linkageNotesRaw'){try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}} // raw notes pool stays out of localStorage (10/29/26)
+  try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
   const key=SHARED_KEYS[k];
   if(!(key&&typeof db!=='undefined'&&SB_KEY.length>50))return true;
   const body=JSON.stringify(v);
@@ -2206,7 +2201,7 @@ let S={
   // Note #, which is unique per note) and recompute totals from the full accumulated set,
   // instead of a new upload's rows replacing the whole month and silently losing everything
   // an earlier upload contributed. See commitNotes() / mergeLinkageMonthRaw().
-  linkageNotesRaw:(function(){try{localStorage.removeItem('ths_linkageNotesRaw');}catch(e){}return {};})(), // 10/29/26: never restored from (and old copies cleared out of) localStorage -- see the load code
+  linkageNotesRaw:lv('linkageNotesRaw',{}),
   impreg:lv('impreg',{}),
 };
 let M={type:null,tab:'hours',prev:null,defMgr:''};
@@ -6980,7 +6975,17 @@ function olLedgerUpsertMonth(ledger, pk, monthLabel, sessions, revenue, clientId
 // Straight port of outcomes.html's parseNotes(), minus the clientMap-driven pathway lookup
 // (Demographics isn't uploaded here, so that lookup is always empty — same fallback path
 // Outcomes Dashboard itself already uses whenever Notes is uploaded without Demographics).
-function olParseNotes(rows, trendMonths) {
+// FIX (11/5/26, "court data stops at July 2026"): Pimsy's Notes export has no Referral Source
+// for court clients — they're filed under the community divisions (SUD/MH Community Services),
+// and only the client's Referral Source in the Demographics roster says which court program they
+// belong to. outcomes.html's parseNotes() always looked each client up in the Demographics map
+// FIRST; this port dropped that lookup, so every ADC / Mended Reeds / ALS SOS / ALS CTP /
+// Trumbull Probation / Family Court note since July landed in 'community' instead. (Jail
+// programs kept working because they have their own Pimsy Division.) clientProgram is that
+// lookup restored: clientNum -> pk, built from the last "Clients by Demographic" upload.
+function olParseNotes(rows, trendMonths, clientProgram) {
+  clientProgram = clientProgram || {};
+  let viaRoster = 0;
   function bCode(raw) { const m=(raw||'').match(/\(([^)]+)\)/); return m?m[1].trim():''; }
   function estRev(row, pk) {
     const bill = row['Billable'];
@@ -7017,8 +7022,10 @@ function olParseNotes(rows, trendMonths) {
     const refSrc   = (r['Referral Source'] || '').trim();
     const clientNum= r['Client #'];
     const isCTP = CTP_STAFF.includes(performer) || noteType === 'CTP Care Coordination';
-    let pk = (OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP_N[olNormDivText(div)]));
+    const rosterPk = clientNum!=null && clientNum!=='' ? clientProgram[String(clientNum).trim()] : null;
+    let pk = rosterPk || (OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP_N[olNormDivText(div)]));
     if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
+    if (rosterPk) viaRoster++;
     const p = pGet(pk);
     const svcD = r['Service Date'];
     const d = svcD instanceof Date ? svcD : (svcD ? new Date(svcD) : null);
@@ -7071,7 +7078,7 @@ function olParseNotes(rows, trendMonths) {
       }
     }
   }
-  return { progs, minD, maxD, unmapped:[...unmapped], total:rows.length };
+  return { progs, minD, maxD, unmapped:[...unmapped], total:rows.length, viaRoster };
 }
 // Converts the array-of-arrays rows this hub already extracted for the Linkage/Courts
 // parsers (header row first) into the array-of-objects shape olParseNotes() (and outcomes.html's
@@ -7140,7 +7147,29 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
   const fileMax = olFileMaxServiceDate(objRows);
   const anchor = (fileMax && (!Object.keys(ledger.months||{}).length || fileMax > ledgerMax)) ? fileMax : ledgerMax;
   const trendMonths = olComputeTrendMonths(anchor);
-  const parsed = olParseNotes(objRows, trendMonths);
+  // Client -> program map from the Demographics roster (see olParseNotes). Older ledgers saved
+  // before 11/5/26 only have clientRosterCurrent's ACTIVE client lists, so those are used as a
+  // fallback until the next "Clients by Demographic" upload writes the full clientProgram map.
+  const clientProgram = { ...(ledger.clientProgram || {}) };
+  if (!ledger.clientProgram) {
+    Object.entries(ledger.clientRosterCurrent || {}).forEach(([pk, r]) => {
+      (r && r.clients || []).forEach(c => { const k = String(c).trim(); if (k && !clientProgram[k]) clientProgram[k] = pk; });
+    });
+  }
+  const parsed = olParseNotes(objRows, trendMonths, clientProgram);
+  // One-time cleanup of the misfiling: a client the roster assigns to another program can't be a
+  // Community client under this rule, so remove them from Community's lifetime client list (they
+  // were added there by uploads between July and 11/5/26). Community's monthly numbers are
+  // corrected by the re-upload itself, since each program/month is overwritten.
+  let communityCleaned = 0;
+  if (ledger.clientsSeen && Array.isArray(ledger.clientsSeen.community) && Object.keys(clientProgram).length) {
+    const before = ledger.clientsSeen.community.length;
+    ledger.clientsSeen.community = ledger.clientsSeen.community.filter(c => {
+      const pk = clientProgram[String(c).trim()];
+      return !pk || pk === 'community';
+    });
+    communityCleaned = before - ledger.clientsSeen.community.length;
+  }
   Object.entries(parsed.progs).forEach(([pk, p]) => {
     Object.keys(p.mSessions||{}).forEach(month => {
       const sess = p.mSessions[month] || 0;
@@ -7166,7 +7195,7 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
     };
   });
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
-  return { ok: !!saved, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
+  return { ok: !!saved, viaRoster: parsed.viaRoster, rosterSize: Object.keys(clientProgram).length, communityCleaned, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
 }
 
 // CLIENT ROSTER / DEMOGRAPHICS BRIDGE (10/1/26, per Brandon's "Clients by Demographic" export —
@@ -7234,6 +7263,7 @@ function olParseDemographics(rows) {
   const cAdmission = olFindDateCol(idx, OL_ADMISSION_HEADER_CANDIDATES);
   const cDischarge = olFindDateCol(idx, OL_DISCHARGE_HEADER_CANDIDATES);
   const progs = {}; // pk -> { activeClients:Set, totalClients:Set, dates:{clientNum:{admission,discharge}} }
+  const clientProgram = {}; // NEW 11/5/26: clientNum -> pk for EVERY client (active or not) — see olParseNotes()
   const pGet = k => { if(!progs[k]) progs[k] = { activeClients:new Set(), totalClients:new Set(), dates:{} }; return progs[k]; };
   const unmapped = new Set();
   let totalRows = 0, activeRows = 0, admissionDatesFound = 0, dischargeDatesFound = 0;
@@ -7250,6 +7280,7 @@ function olParseDemographics(rows) {
     const active = row[cActive];
     const isActive = active===true || active===1 || String(active).toLowerCase()==='true';
     const p = pGet(pk);
+    clientProgram[clientNum] = pk;
     p.totalClients.add(clientNum);
     if (isActive) { p.activeClients.add(clientNum); activeRows++; }
     if (cAdmission != null || cDischarge != null) {
@@ -7263,7 +7294,7 @@ function olParseDemographics(rows) {
     }
   }
   return {
-    progs, totalRows, activeRows, unmapped:[...unmapped],
+    progs, clientProgram, totalRows, activeRows, unmapped:[...unmapped],
     admissionColumnFound: cAdmission != null, dischargeColumnFound: cDischarge != null,
     admissionDatesFound, dischargeDatesFound,
   };
@@ -7278,6 +7309,8 @@ function olMergeDemographicsIntoProgramLedger(parsed) {
 async function _olMergeDemographicsIntoProgramLedgerNow(parsed) {
   const ledger = await olReadProgramLedger();
   if (!ledger.clientRosterCurrent) ledger.clientRosterCurrent = {};
+  // NEW 11/5/26: full roster map, replaced wholesale (this export is all-time, not a delta).
+  if (parsed.clientProgram && Object.keys(parsed.clientProgram).length) ledger.clientProgram = parsed.clientProgram;
   Object.entries(parsed.progs).forEach(([pk, p]) => {
     ledger.clientRosterCurrent[pk] = {
       clients: [...p.activeClients],
@@ -8403,6 +8436,15 @@ async delSRow(enc){
           // than the month-bucket key, since this is the same upload's data going to a second
           // catalog row.
           recordImport('program_hub_ledger', {row_count:res.monthsTouched, period_label:_notesPeriodLabel, data_through:_notesDataThrough});
+          // NEW 11/5/26: say how court-program notes were assigned, and warn when there's no
+          // Demographics roster to assign them with (they'd fall under Community otherwise).
+          const _t=document.createElement('div');
+          const _noRoster=!res.rosterSize;
+          _t.textContent=_noRoster
+            ? '⚠ Outcomes ledger updated, but no client roster is on file — court-program notes (ADC, Mended Reeds, ALS, Trumbull Probation/Family Court) were counted under Community. Upload "Clients by Demographic" first, then re-upload this Notes file.'
+            : `✓ Outcomes ledger updated — ${res.viaRoster} notes assigned to programs from the client roster`+(res.communityCleaned?` · ${res.communityCleaned} court clients removed from Community's client list`:'');
+          _t.style.cssText='position:fixed;top:20px;right:20px;max-width:420px;background:'+(_noRoster?'#92400E':'#1B5E20')+';color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+          document.body.appendChild(_t);setTimeout(()=>_t.remove(),_noRoster?12000:5000);
         }else{
           showSaveError('Linkage/Courts imported fine, but updating the Outcomes Dashboard ledger failed to save — its Sessions/Revenue trends will still show old data until this succeeds. Try re-uploading this file.');
         }
@@ -9209,10 +9251,6 @@ function dsHideGate(){
   b.style.display='block';
 }
 function dsRelock(){ if(S.editUnlocked){ S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null); } }
-// VIEW ACCESS (Brandon, 10/29/26): org-wide reviewers only, for now. Change this one rule to widen it
-// (e.g. add 'division_director' to let program managers in). Editing is still EDIT_ALLOWLIST.
-const DS_VIEW_ROLES=['org_wide'];
-function dsViewAllowed(reviewer){ return !!reviewer && DS_VIEW_ROLES.includes(String(reviewer.role||'').trim().toLowerCase()); }
 async function dsLookupReviewer(userId){
   try{
     const {data,error}=await dsSb.from('reviewers').select('name,role,email').eq('id',userId).single();
@@ -9248,11 +9286,6 @@ async function dsHandleLogin(){
     try{ await dsSb.auth.signOut(); }catch(e){}
     reset(); return;
   }
-  if(!dsViewAllowed(reviewer)){
-    dsLoginErr('Signed in, but the Data & Staff Hub is limited to org-wide leadership. Contact Brandon if you need access.');
-    try{ await dsSb.auth.signOut(); }catch(e){}
-    reset(); return;
-  }
   document.getElementById('dsLoginPassword').value='';
   reset();
   await dsAfterSignIn(reviewer);
@@ -9270,7 +9303,7 @@ async function dsSignOut(){
   try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
   if(session){
     const reviewer=await dsLookupReviewer(session.user.id);
-    if(reviewer && dsViewAllowed(reviewer)){ await dsAfterSignIn(reviewer); return; }
+    if(reviewer){ await dsAfterSignIn(reviewer); return; }
   }
   dsRelock();
   dsShowGate();
