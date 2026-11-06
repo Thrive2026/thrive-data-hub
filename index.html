@@ -7217,7 +7217,38 @@ function olBuildRosterMonthly(ledger){
       });
     });
   });
+  Object.values(ledger.graduations || {}).forEach(g => {
+    const ml = g && g.date ? olMLabel(new Date(g.date + 'T12:00:00')) : null;
+    if (!ml) return;
+    if (!out[g.pk]) out[g.pk] = {};
+    if (!out[g.pk][ml]) out[g.pk][ml] = { admitted:0, discharged:0, referred:0 };
+    out[g.pk][ml].graduated = (out[g.pk][ml].graduated || 0) + 1;
+  });
   ledger.rosterMonthly = out;
+}
+// NEW (11/6/26): graduations from the Renewals workbook (Graduation renewal → Renewal Date),
+// stored per client in ledger.graduations = {clientNum: {pk, date}} — program from the client
+// roster first, else the renewal row's Referral Source. Merged (latest date wins), never wiped,
+// since a renewals file only lists clients still in Pimsy's tracker. Counted per month into
+// ledger.rosterMonthly[pk][month].graduated by olBuildRosterMonthly().
+function olMergeGraduationsIntoProgramLedger(gradByClient){
+  return olLedgerSerialized(async () => {
+    const ledger = await olReadProgramLedger();
+    const grads = ledger.graduations || {};
+    const cp = ledger.clientProgram || {};
+    let added = 0;
+    Object.entries(gradByClient || {}).forEach(([c, g]) => {
+      const k = String(c).trim();
+      const pk = cp[k] || OL_PIMSY_REF_MAP_N[olNormDivText(g.ref)] || null;
+      if (!pk || pk === 'archived') return;
+      const iso = g.date.toISOString().slice(0,10);
+      if (!grads[k] || grads[k].date < iso) { grads[k] = { pk, date: iso }; added++; }
+    });
+    ledger.graduations = grads;
+    olBuildRosterMonthly(ledger);
+    const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
+    return { ok: !!saved, added };
+  });
 }
 function olMergeNotesIntoProgramLedger(objRows){
   return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows));
@@ -9014,6 +9045,7 @@ async delSRow(enc){
     // no longer appear anywhere (final-noted/discharged), separately from staff-name-matching
     // and no-date bookkeeping, which are different concerns and must not be conflated with it.
     const knownClientIds=new Set();
+    const gradByClient={}; // NEW 11/6/26 — see below
     let noMatch=0,noDate=0;
     // FIX (9/14): named alongside the counts now, not just counted — a bare "3 rows skipped"
     // is exactly what let Molly's rows go unnoticed for weeks. This mirrors the Hospital
@@ -9033,6 +9065,12 @@ async delSRow(enc){
       const expiresOn=parseUSDate(p[colExpires]);
       const lastBillableDate=parseUSDate(p[colLastBillable]);
       if(clientId)knownClientIds.add(clientId.toLowerCase());
+      // NEW (11/6/26): graduations for the Outcomes Dashboard, any program, from the Graduation
+      // renewal's Renewal Date — kept per client (latest date), with the row's Referral Source.
+      if(clientId && colRenewalDate>=0 && /graduat/i.test(renewalName+' '+renewalType)){
+        const gd=parseUSDate(p[colRenewalDate]);
+        if(gd){ const prevG=gradByClient[clientId]; if(!prevG || gd>prevG.date) gradByClient[clientId]={date:gd, ref:referralSource}; }
+      }
       if(!clientId||!peerRaw){continue;}
       const nameKey=peerRaw.toLowerCase().replace(/\s+/g,' ');
       const staff=resolveStaffByAlias(peerRaw)||staffByName[nameKey];
@@ -9057,7 +9095,7 @@ async delSRow(enc){
 
     const {toImport,toUpdate,dupes,reassignments}=ThriveRenewals.mergeRenewalImport(S.renewals,parsedRows,{dueDateFallbackDays:5,knownClientIds});
     const closed=toUpdate.filter(u=>u.reason==='discharged').length;
-    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[],retention};
+    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[],retention,gradByClient};
     modH();
   },
   // FIX: previously only applied rev.toImport and returned early whenever there were zero new
@@ -9083,6 +9121,7 @@ async delSRow(enc){
       if(rev&&rev.retention){
         const btn0=document.getElementById('renBulkConfirmBtn'); if(btn0){btn0.disabled=true;btn0.textContent='Saving…';}
         const ok0=await saveRetention(rev.retention);
+        if(rev.gradByClient) olMergeGraduationsIntoProgramLedger(rev.gradByClient).catch(e=>console.warn('[graduations]',e));
         if(ok0){ const t=document.createElement('div');t.textContent=`✓ Graduation & fall-off data saved for ${Object.keys(rev.retention).length} clients (no renewal changes)`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3500); }
       }
       M.prevRen=null;render();return;}
@@ -9119,6 +9158,7 @@ async delSRow(enc){
     S.renewals=nextRenewals;
     recordImport('renewals_workbook', {row_count:nImport+nUpdate});
     if(rev.retention) await saveRetention(rev.retention);
+    if(rev.gradByClient) olMergeGraduationsIntoProgramLedger(rev.gradByClient).catch(e=>console.warn('[graduations]',e));
     M.prevRen=null;render();
     const t=document.createElement('div');t.textContent=`✓ Applied ${nImport+nUpdate} change${(nImport+nUpdate)!==1?'s':''} (${nImport} new, ${nUpdate} updated) — saved`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
