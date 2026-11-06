@@ -8213,6 +8213,12 @@ async delSRow(enc){
     return H._klipCommitChain;
   },
   async _commitKlipNow(parsed){
+    // FIX (11/6/26): parseKlip() now also returns rawRows (every row of the file) for the Outcomes
+    // ledger bridge. Those must NOT ride along into director_pimsy below — a year-long export made
+    // that save tens of MB and it failed ("Save failed — the Klip billing data … was not saved").
+    const rawRows = parsed.rawRows;
+    parsed = { ...parsed };
+    delete parsed.rawRows;
     // Snapshot EVERY month found in the file into director_pimsy_history — mirrors Director
     // Hub's own importUnified()/snapshotPimsyHistory() exactly, so nothing is lost even if a
     // file happens to span a month boundary (see the long comment inside parseKlip above for
@@ -8265,8 +8271,8 @@ async delSRow(enc){
 
     // NEW (11/6/26): Klipfolio is now the guide for the Outcomes Dashboard's monthly contract
     // numbers — feed the same raw rows into program_ledger (see olMergeKlipIntoProgramLedger).
-    if (parsed.rawRows && parsed.rawRows.length > 1) {
-      olMergeKlipIntoProgramLedger(parsed.rawRows).then(res => {
+    if (rawRows && rawRows.length > 1) {
+      olMergeKlipIntoProgramLedger(rawRows).then(res => {
         if (!res || !res.ok) { showSaveError('Klip billing saved for Director Hub, but the Outcomes Dashboard monthly numbers were not updated. Try re-uploading this file.'); return; }
         recordImport('program_hub_ledger', { source_filename: parsed.sourceFilename || null, row_count: res.monthsTouched, period_label: parsed.period || null, data_through: parsed.periodEndDate || null });
         const t2=document.createElement('div');
