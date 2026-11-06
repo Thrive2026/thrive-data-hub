@@ -2953,6 +2953,25 @@ function modH(){
       </div>`;
       })()):''}
     </div>
+    <div style="background:#eef2fb;border:1px solid #c9d3f0;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📑 ADC Report Builder <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly report · Quarterly workbook</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Builds the ADC monthly report or quarterly workbook from Pimsy exports. <b>Runs only in your browser — nothing is uploaded or saved.</b> Include First Name, Last Name and Date of Birth in the Clients by Demographic export (Active Only unchecked).</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;font-size:12px;color:#3e4a78">
+        <label>Klipfolio export (required)<br><input type="file" accept=".xlsx,.xls" onchange="M.adcFiles=Object.assign(M.adcFiles||{}, {klip:this.files[0]})" style="font-size:12px;font-family:inherit"></label>
+        <label>Clients by Demographic (required)<br><input type="file" accept=".xlsx,.xls" onchange="M.adcFiles=Object.assign(M.adcFiles||{}, {demo:this.files[0]})" style="font-size:12px;font-family:inherit"></label>
+        <label>Notes export (optional — fills Outcome from Final Notes)<br><input type="file" accept=".xlsx,.xls" onchange="M.adcFiles=Object.assign(M.adcFiles||{}, {notes:this.files[0]})" style="font-size:12px;font-family:inherit"></label>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;font-size:12px;color:#3e4a78">
+        <select id="adcType" class="inp" style="width:auto" onchange="document.getElementById('adcMonthWrap').style.display=this.value==='month'?'inline-flex':'none';document.getElementById('adcQWrap').style.display=this.value==='quarter'?'inline-flex':'none';document.getElementById('adcRule').value=this.value==='month'?'peer':'all'">
+          <option value="month">Monthly report</option><option value="quarter">Quarterly workbook</option></select>
+        <span id="adcMonthWrap" style="display:inline-flex;gap:6px;align-items:center">Month <input id="adcMonth" type="month" class="inp" style="width:auto" value="${(()=>{const d=new Date();d.setMonth(d.getMonth()-1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');})()}"></span>
+        <span id="adcQWrap" style="display:none;gap:6px;align-items:center">Quarter <select id="adcQ" class="inp" style="width:auto"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select><input id="adcYear" type="number" class="inp" style="width:80px" value="${new Date().getFullYear()}"></span>
+        <select id="adcRule" class="inp" style="width:auto" title="Which services count toward Service Count and Minutes">
+          <option value="peer">Count peer support only (H0038)</option><option value="all">Count all billable codes</option></select>
+        <button class="btn-n" style="font-size:12px" onclick="adcRunBuilder()">Build &amp; download</button>
+      </div>
+      <div id="adcStatus" style="font-size:12px;margin-top:8px"></div>
+    </div>
     <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📊 Productivity (Hours) &amp; Progress to Goal <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Biweekly</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the real Pimsy productivity export (.xlsx) — if your workbook has one tab per period (e.g. "06.06 - 06.19"), the period is read directly from the tab name and both the current and previous period tabs are imported automatically. Plain CSV/TSV paste also still works (Pimsy ID, Hours).</div>
@@ -7612,6 +7631,166 @@ async function _olMergeDemographicsIntoProgramLedgerNow(parsed) {
   olBuildRosterMonthly(ledger);
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
   return { ok: !!saved, programsTouched: Object.keys(parsed.progs).length };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADC REPORT BUILDER (11/6/26, per Brandon). Builds the ADC monthly report and the ADC quarterly
+// workbook from the same Pimsy exports the team already pulls — Klipfolio (services + minutes),
+// Clients by Demographic (names, DOB, referral/termination dates, demographics) and, optionally,
+// Notes (Final Note text for the "Outcome" column). Runs entirely in the browser: the files are
+// read locally, the workbook is generated locally, and NOTHING is uploaded or saved to Supabase,
+// so client-level detail never leaves the user's computer.
+// Verified against the team's own Sept 2026 monthly (58 clients / 254 services / 32,651 min,
+// exact match with peer codes only) and Q3 2026 quarterly (Active tab: 76 of 78 clients exact
+// with all billable codes). Columns the exports can't fill are left blank on purpose:
+// Date of Referral from Coordinator (Kristy's tracker), Date of Assignment to Provider (Q&A
+// Demographics), Intake Completed with Thrive (Renewals), Treatment Plan Priorities.
+// ══════════════════════════════════════════════════════════════════════════════
+const ADC_REF_SOURCES = ['cuyahoga county adc','mh-adc'];
+const ADC_SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+function adcLoadSheetJS(){
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((res, rej) => { const s=document.createElement('script'); s.src=ADC_SHEETJS_URL; s.onload=()=>res(window.XLSX); s.onerror=()=>rej(new Error('Could not load the spreadsheet library — check your connection and try again.')); document.head.appendChild(s); });
+}
+const adcNorm = s => String(s==null?'':s).replace(/\s+/g,' ').trim();
+const adcLow = s => adcNorm(s).toLowerCase();
+// Excel serial -> 'YYYY-MM' (integer day math, no timezone drift)
+function adcSerialYM(v){ if (typeof v !== 'number' || !isFinite(v)) return null; const d = new Date(Math.round((Math.floor(v) - 25569) * 86400000)); return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0'); }
+function adcSerial(v){
+  if (typeof v === 'number') return v;
+  if (v instanceof Date) return v.getTime()/86400000 + 25569 - v.getTimezoneOffset()/1440;
+  if (typeof v === 'string' && v.trim()) { const d = new Date(v); if (!isNaN(d)) return d.getTime()/86400000 + 25569 - d.getTimezoneOffset()/1440; }
+  return null;
+}
+// Reads the first sheet whose header row contains every required column; returns row objects keyed by lowercased header.
+function adcReadRows(XLSX, buf, required, label){
+  const wb = XLSX.read(buf, { type:'array', cellDates:false });
+  for (const name of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], { header:1, raw:true, defval:null });
+    for (let h = 0; h < Math.min(6, aoa.length); h++) {
+      const hdr = (aoa[h]||[]).map(adcLow);
+      if (required.every(c => hdr.includes(c))) {
+        return aoa.slice(h+1).filter(r => r && r.some(v => v !== null && v !== '')).map(r => { const o = {}; hdr.forEach((k,i) => { if (k) o[k] = r[i]; }); return o; });
+      }
+    }
+  }
+  throw new Error(`${label}: couldn't find the columns ${required.map(c=>'"'+c+'"').join(', ')}. Is this the right export?`);
+}
+function adcCodeOk(code, rule){
+  const c = adcNorm(code);
+  if (!c || /non-?\s*billable/i.test(c) || /^\(?admin\b/i.test(c) || /^ctp (admin|engagement)/i.test(c)) return false;
+  return rule === 'peer' ? /^\(?H0038/i.test(c) : true;
+}
+// period: {type:'month', ym:'2026-09'} or {type:'quarter', year:2026, q:3}
+function adcBuild(XLSX, klipRows, demoRows, notesRows, period, rule){
+  const months = period.type === 'month' ? [period.ym] : [0,1,2].map(i => period.year+'-'+String((period.q-1)*3+1+i).padStart(2,'0'));
+  const inPeriod = v => { const ym = adcSerialYM(adcSerial(v)); return ym && months.includes(ym); };
+  // roster
+  const demo = {};
+  demoRows.forEach(r => { const c = adcNorm(r['client number']); if (c) demo[c] = r; });
+  const isAdcClient = c => demo[c] && ADC_REF_SOURCES.includes(adcLow(demo[c]['referral source']));
+  // services
+  const svc = {}; // client -> {count, minutes, firstServiceSerial}
+  const firstAny = {};
+  klipRows.forEach(r => {
+    const c = adcNorm(r['client']); if (!c) return;
+    const adc = isAdcClient(c) || ADC_REF_SOURCES.includes(adcLow(r['referral source'])); // roster OR the Klipfolio row's own Referral Source (matches how the team filters Klipfolio)
+    if (!adc || !adcCodeOk(r['service code'], rule)) return;
+    const s = adcSerial(r['service date']); if (s == null) return;
+    if (firstAny[c] == null || s < firstAny[c]) firstAny[c] = s;
+    if (!inPeriod(s)) return;
+    const o = svc[c] = svc[c] || { count:0, minutes:0 };
+    o.count++; o.minutes += Number(r['duration in minutes']) || 0;
+  });
+  const D = c => demo[c] || {};
+  const nameOf = c => { const d = D(c); if (d['client name']) return adcNorm(d['client name']); const ln = adcNorm(d['last name']), fn = adcNorm(d['first name']); return ln||fn ? `${ln}, ${fn}` : ''; };
+  const lastFirst = c => { const d = D(c); return [adcLow(d['last name'] || (d['client name']||'').split(',')[0]), adcLow(d['first name'] || (d['client name']||'').split(',')[1])]; };
+  const numPart = c => parseInt(String(c).replace(/\D+/g,''),10) || 0;
+  const dob = c => adcSerial(D(c)['date of birth']);
+  const refD = c => adcSerial(D(c)['date of referral']);
+  const termD = c => adcSerial(D(c)['date of termination']);
+  // First service with provider: only when the referral date falls inside the Klipfolio file's date range
+  // (otherwise the real first service may predate the file and the earliest row would be wrong).
+  const klipStart = Math.min(...Object.values(firstAny).concat([Infinity]));
+  const firstWithProvider = c => { const r = refD(c), f = firstAny[c]; return (f != null && r != null && Math.floor(r) >= Math.floor(klipStart) && f >= Math.floor(r)) ? f : null; };
+  const warnings = [];
+  if (!demoRows.some(r => r['date of birth'] != null)) warnings.push('The Clients by Demographic export has no Date of Birth column — add it in Pimsy for the DOB column to fill.');
+  if (!demoRows.some(r => r['first name'] != null || r['client name'] != null)) warnings.push('The Clients by Demographic export has no name columns — add First Name / Last Name (or Client Name) in Pimsy.');
+  const sheets = [];
+  const DATE = 'm/d/yyyy';
+  if (period.type === 'month') {
+    const clients = Object.keys(svc).sort((a,b) => { const A=lastFirst(a), B=lastFirst(b); return A[0].localeCompare(B[0]) || A[1].localeCompare(B[1]) || a.localeCompare(b); });
+    const label = new Date(Date.UTC(+period.ym.slice(0,4), +period.ym.slice(5)-1, 15)).toLocaleDateString('en-US',{month:'long',year:'numeric',timeZone:'UTC'});
+    sheets.push({ name: label, widths:[13,13,13,13,13,18,37,18,13,32,35],
+      header:['Client Num.','Service Minutes','Count of Service','First Name','Last Name','Date of Birth.','Date of Referral from Coordinator','Date of Referral','Date of Term.','Date of Assignment to Provider','Date of First Service with Provider'],
+      rows: clients.map(c => [c, svc[c].minutes, svc[c].count, adcNorm(D(c)['first name'] || (D(c)['client name']||'').split(',')[1]), adcNorm(D(c)['last name'] || (D(c)['client name']||'').split(',')[0]), dob(c), null, refD(c), termD(c), null, firstWithProvider(c)]),
+      dateCols:[5,6,7,8,9,10] });
+    return { sheets, warnings, summary:{ clients: clients.length, services: clients.reduce((s,c)=>s+svc[c].count,0), minutes: clients.reduce((s,c)=>s+svc[c].minutes,0) }, fileName:`ADC_Monthly_Report_${label.replace(' ','_')}.xlsx` };
+  }
+  const adcClients = Object.keys(demo).filter(isAdcClient);
+  const sc = c => svc[c] ? svc[c].count : 'N/A', sm = c => svc[c] ? svc[c].minutes : 'N/A';
+  // Referred in Quarter
+  const referred = adcClients.filter(c => inPeriod(refD(c))).sort((a,b) => (refD(b)||0) - (refD(a)||0));
+  sheets.push({ name:'Referred in Quarter', widths:[14,22,13,32,15,28,8,25,14,24,6,21,14,16,20],
+    header:['Client Number','Client Name','Date of Birth','Date of Referral from Coordinator','Date of Referral','Intake Completed with Thrive','Gender','Grade','Marital Status','Race','Age','Ethnicity','Service Count','Billable Minutes','Terminated in Quarter'],
+    rows: referred.map(c => { const d=D(c); return [c, nameOf(c), dob(c), null, refD(c), null, adcNorm(d['gender']), adcNorm(d['grade']), adcNorm(d['marital status']), adcNorm(d['race']), d['age']??null, adcNorm(d['ethnicity']), sc(c), sm(c), inPeriod(termD(c)) ? 'Yes' : '']; }),
+    dateCols:[2,3,4,5] });
+  // Active in Quarter
+  const active = Object.keys(svc).sort((a,b) => numPart(a) - numPart(b));
+  sheets.push({ name:'Active in Quarter', widths:[14,25,13,15,18,13,15,67],
+    header:['Client Number','Client Name','Date of Birth','Date of Referral','Date of Termination','Service Count','Billable Minutes','Treatment Plan Priorities'],
+    rows: active.map(c => [c, nameOf(c), dob(c), refD(c), termD(c), svc[c].count, svc[c].minutes, null]), dateCols:[2,3,4] });
+  // Terminated in Quarter (+ Final Note text as Outcome when Notes was provided)
+  const finalNote = {};
+  (notesRows||[]).forEach(r => {
+    if (!/final note/i.test(adcNorm(r['note type']))) return;
+    const c = adcNorm(r['client #']); const s = adcSerial(r['service date']); if (!c || s == null) return;
+    if (!finalNote[c] || s > finalNote[c].s) finalNote[c] = { s, text: adcNorm(r['note text']) };
+  });
+  const terminated = adcClients.filter(c => inPeriod(termD(c))).sort((a,b) => (termD(b)||0) - (termD(a)||0));
+  if (notesRows && notesRows.length && terminated.some(c => !finalNote[c])) warnings.push(`${terminated.filter(c=>!finalNote[c]).length} terminated clients have no Final Note in the Notes file, so their Outcome is blank — check that the Notes export covers the whole quarter.`);
+  sheets.push({ name:'Terminated in Quarter', widths:[14,23,12,15,19,83,13,13],
+    header:['Client Number','Client Name','Date of Birth','Date of Referral','Date of Termination','Outcome','Service Count','Billable Minutes'],
+    rows: terminated.map(c => [c, nameOf(c), dob(c), refD(c), termD(c), finalNote[c] ? finalNote[c].text : null, sc(c), sm(c)]), dateCols:[2,3,4] });
+  sheets.push({ name:'Quarterly Tx Plan Priorities', widths:[26,13],
+    header:['Treatment Plan Priority','Clients'], rows:['Education','Employment','Health','Housing','Mental Health Services','Other','Pro Social'].map(k=>[k,null]), dateCols:[] });
+  warnings.push('Not in these exports, left blank: Date of Referral from Coordinator (ADC tracker), Intake Completed with Thrive (Renewals), Treatment Plan Priorities (Comprehensive Outcomes).');
+  return { sheets, warnings, summary:{ referred: referred.length, active: active.length, terminated: terminated.length, services: active.reduce((s,c)=>s+svc[c].count,0), minutes: active.reduce((s,c)=>s+svc[c].minutes,0) }, fileName:`ADC_Quarterly_Q${period.q}_${period.year}.xlsx` };
+}
+function adcToWorkbook(XLSX, built){
+  const wb = XLSX.utils.book_new();
+  built.sheets.forEach(sh => {
+    const ws = XLSX.utils.aoa_to_sheet([sh.header, ...sh.rows]);
+    sh.rows.forEach((row, ri) => sh.dateCols.forEach(ci => { const v = row[ci]; if (typeof v === 'number') { const ref = XLSX.utils.encode_cell({ r: ri+1, c: ci }); ws[ref] = { t:'n', v, z:'m/d/yyyy' }; } }));
+    ws['!cols'] = sh.widths.map(w => ({ wch: w }));
+    XLSX.utils.book_append_sheet(wb, ws, sh.name.slice(0,31));
+  });
+  return wb;
+}
+async function adcRunBuilder(){
+  const st = document.getElementById('adcStatus');
+  const say = (html, err) => { if (st) { st.innerHTML = html; st.style.color = err ? '#991B1B' : '#1a2861'; } };
+  try {
+    const F = M.adcFiles || {};
+    if (!F.klip || !F.demo) { say('Choose the Klipfolio export and the Clients by Demographic export first.', true); return; }
+    const type = document.getElementById('adcType').value, rule = document.getElementById('adcRule').value;
+    let period;
+    if (type === 'month') { const ym = document.getElementById('adcMonth').value; if (!/^\d{4}-\d{2}$/.test(ym)) { say('Pick a month.', true); return; } period = { type, ym }; }
+    else { period = { type, year: +document.getElementById('adcYear').value, q: +document.getElementById('adcQ').value }; }
+    say('Reading files…');
+    const XLSX = await adcLoadSheetJS();
+    const buf = f => f.arrayBuffer();
+    const klip = adcReadRows(XLSX, await buf(F.klip), ['client','service date','service code','duration in minutes'], 'Klipfolio');
+    const demo = adcReadRows(XLSX, await buf(F.demo), ['client number','referral source','date of referral'], 'Clients by Demographic');
+    const notes = F.notes ? adcReadRows(XLSX, await buf(F.notes), ['client #','service date','note type'], 'Notes') : null;
+    const built = adcBuild(XLSX, klip, demo, notes, period, rule);
+    const out = XLSX.write(adcToWorkbook(XLSX, built), { bookType:'xlsx', type:'array' });
+    const url = URL.createObjectURL(new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    const a = document.createElement('a'); a.href = url; a.download = built.fileName; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+    const s = built.summary;
+    const sumTxt = period.type === 'month' ? `${s.clients} clients · ${s.services} services · ${s.minutes.toLocaleString()} minutes` : `Referred ${s.referred} · Active ${s.active} (${s.services} services, ${s.minutes.toLocaleString()} min) · Terminated ${s.terminated}`;
+    say(`✓ Downloaded <b>${xe(built.fileName)}</b> — ${sumTxt}.` + (built.warnings.length ? `<div style="margin-top:6px;color:#92400E">${built.warnings.map(w=>'⚠ '+xe(w)).join('<br>')}</div>` : ''));
+  } catch (err) { console.error('[adcRunBuilder]', err); say('Couldn\'t build the report: ' + xe(err && err.message || err), true); }
 }
 
 const H={
