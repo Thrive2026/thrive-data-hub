@@ -1788,6 +1788,7 @@ async function parseKlip(arrayBuffer){
   }
   const latest = promoteKey ? monthly[promoteKey] : null;
   return {
+    rawRows: sheetRows, // NEW 11/6/26 — raw rows (header first) for the Outcomes ledger bridge (olKlipRowsToObjects)
     period: latest ? latest.period : 'Unknown period',
     generated,
     // A totally-failed parse (no valid dated rows found at all) used to fall back to today's
@@ -6988,13 +6989,17 @@ function olLedgerUpsertMonth(ledger, pk, monthLabel, sessions, revenue, clientId
 function olParseNotes(rows, trendMonths, clientProgram) {
   clientProgram = clientProgram || {};
   let viaRoster = 0;
-  function bCode(raw) { const m=(raw||'').match(/\(([^)]+)\)/); return m?m[1].trim():''; }
+  // Notes codes look like "(H0038) Community Peer Support"; Klipfolio codes are bare ("H0038").
+  function bCode(raw) { const m=(raw||'').match(/\(([^)]+)\)/); return m?m[1].trim():String(raw||'').trim(); }
   function estRev(row, pk) {
     const bill = row['Billable'];
     if (!bill && bill !== true && bill !== 1 && String(bill).toLowerCase() !== 'true') return 0;
     const code = bCode(row['Billing Code'] || '');
     const units = parseInt(row['Units Used']) || 0;
-    if (/^H0038/.test(code)) return units * OL_H0038_RATE;
+    if (/^H0038/.test(code)) {
+      if (units) return units * OL_H0038_RATE;
+      if (row['Total Charge'] != null) return parseFloat(row['Total Charge']) || 0; // Klipfolio rows carry the charge, not units
+    }
     return 0;
   }
   const progs = {};
@@ -7071,7 +7076,7 @@ function olParseNotes(rows, trendMonths, clientProgram) {
     // service count, minutes, individuals engaged, staff. Telehealth = billing code with GT.
     const codeStr = String(r['Billing Code'] || '');
     const billCol = Object.prototype.hasOwnProperty.call(r, 'Billable') ? (bill===true||bill===1||String(bill).toLowerCase()==='true') : true;
-    const isBillable = billCol && !/^\s*\(admin\)/i.test(codeStr) && !/non-?\s*billable/i.test(codeStr);
+    const isBillable = billCol && !/^\s*\(?admin\b/i.test(codeStr) && !/non-?\s*billable/i.test(codeStr);
     if (clientNum && d && !isNaN(d)) {
       const ck = String(clientNum).trim();
       (clientNotes[ck] = clientNotes[ck] || []).push({ d, community: divPk === 'community', billable: isBillable });
@@ -7251,9 +7256,54 @@ function olMergeGraduationsIntoProgramLedger(gradByClient){
   });
 }
 function olMergeNotesIntoProgramLedger(objRows){
-  return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows));
+  return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows, 'notes'));
 }
-async function _olMergeNotesIntoProgramLedgerNow(objRows){
+// NEW (11/6/26, per Brandon: "use the Klip as the guide, not the Pimsy notes"). Klipfolio is the
+// source of truth for the monthly contract numbers (engaged, contacts, minutes, telehealth/in-
+// person, staff hours, new, referral → first contact). A month written from Klipfolio is tagged
+// src:'klip'; a later Notes upload will NOT overwrite those numbers — Notes only adds what
+// Klipfolio can't carry: the jail release / outreach rows (they need Note Type) and the
+// current-client sets (they need Client Active).
+// Why: a 10/29 Notes export missed 8 late-October Mended Reeds visits that weren't signed yet,
+// so the hub showed 47 contacts where the report (Klipfolio) correctly showed 56.
+function olKlipRowsToObjects(rows){
+  if (!rows || rows.length < 2) return [];
+  const hdr = rows[0].map(h => String(h||'').trim());
+  const ix = n => hdr.findIndex(h => h.toLowerCase() === n);
+  const c = { client:ix('client'), ref:ix('referral source'), div:ix('division'), date:ix('service date'),
+    code:(ix('service code')>=0?ix('service code'):ix('billing code')), prov:(ix('provider')>=0?ix('provider'):ix('performed by')),
+    min:ix('duration in minutes'), charge:ix('total charge'), inv:ix('invoice numbers') };
+  const toDate = v => { if (typeof v === 'number') { const d = new Date(Math.round((v - 25569) * 86400000)); return new Date(d.getTime() + d.getTimezoneOffset()*60000); } if (v) { const d = new Date(v); return isNaN(d) ? null : d; } return null; };
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i]; if (!r) continue;
+    const client = c.client >= 0 ? String(r[c.client]||'').trim() : '';
+    const d = toDate(r[c.date]);
+    if (!client || !d) continue;
+    const code = String(r[c.code]||'').trim();
+    const billable = !/^\(?admin\b/i.test(code) && !/non-?\s*billable/i.test(code);
+    const inv = c.inv >= 0 ? String(r[c.inv]||'').trim() : '';
+    out.push({
+      'Note #': inv ? inv + '|' + client + '|' + d.getTime() : null,
+      'Client #': client,
+      'Referral Source': c.ref >= 0 ? r[c.ref] : '',
+      'Division': c.div >= 0 ? r[c.div] : '',
+      'Service Date': d,
+      'Billing Code': code,
+      'Performed By': c.prov >= 0 ? r[c.prov] : '',
+      'Duration in Minutes': c.min >= 0 ? r[c.min] : 0,
+      'Total Charge': c.charge >= 0 ? r[c.charge] : null,
+      'Billable': billable,
+    });
+  }
+  return out;
+}
+function olMergeKlipIntoProgramLedger(rawRows){
+  const objRows = olKlipRowsToObjects(rawRows);
+  return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows, 'klip'));
+}
+async function _olMergeNotesIntoProgramLedgerNow(objRows, source){
+  source = source || 'notes';
   const ledger = await olReadProgramLedger();
   if (!ledger.clientSetsCurrent) ledger.clientSetsCurrent = {};
   const ledgerMax = olLedgerMaxMonth(ledger);
@@ -7332,9 +7382,19 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
   Object.entries(ledger.clientsSeen || {}).forEach(([pk, arr]) => { priorSeen[pk] = new Set((arr||[]).map(c => String(c).trim())); });
   const lastFileMonth = fileMonths[fileMonths.length - 1];
   const lastFileDay = parsed.maxD ? parsed.maxD.getDate() : null;
+  let klipKept = 0;
   Object.entries(parsed.progs).forEach(([pk, p]) => {
+    // Release cohort months can exist without billable sessions — write those too (Notes only).
+    if (source === 'notes' && p.mRelease) {
+      Object.entries(p.mRelease).forEach(([month, rel]) => {
+        if (skipMonths.has(month)) return;
+        const key = pk + '||' + month;
+        if (ledger.months[key] && ledger.months[key].src === 'klip') Object.assign(ledger.months[key], rel);
+      });
+    }
     Object.keys(p.mSessions||{}).forEach(month => {
       if (skipMonths.has(month)) return;
+      if (source === 'notes' && ledger.months[pk+'||'+month] && ledger.months[pk+'||'+month].src === 'klip') { klipKept++; return; }
       const sess = p.mSessions[month] || 0;
       const rev  = Math.round((p.mRevenue && p.mRevenue[month]) || 0);
       const clientSet = p.mClients[month] || new Set();
@@ -7356,6 +7416,7 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
         teleVisits: p.mTele[month] || 0, inPersonVisits: p.mInPerson[month] || 0,
         directPeerHours: Math.round(((p.mPeerMinutes[month] || 0) / 60) * 10) / 10 };
       if (p.mRelease) Object.assign(extras, p.mRelease[month] || { released:0, outreach3d:0, outreach2wk:0, outreach1mo:0, linkedCommunity:0 });
+      extras.src = source;
       // Referral → first contact (data-point guide, Trumbull Probation): clients this program
       // REFERRED this month (Demographics Date of Referral), days to their first note of any kind
       // on/after that date. Only for referrals on/after the file's first Service Date, so a first
@@ -7374,6 +7435,7 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
     // needs. Overwritten wholesale on every upload (not merged), matching how Outcomes
     // Dashboard's own buildKpi() has always treated "hub period" — the range covered by
     // whatever Notes file was uploaded most recently, not a running lifetime total.
+    if (source === 'klip') return; // Klipfolio has no Client Active column — current-client sets stay Notes-driven
     ledger.clientSetsCurrent[pk] = {
       clients: [...p.clients],
       activeCl: [...p.activeCl],
@@ -7386,7 +7448,7 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
   });
   olBuildRosterMonthly(ledger);
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
-  return { ok: !!saved, skippedMonths: [...skipMonths], viaRoster: parsed.viaRoster, rosterSize: Object.keys(clientProgram).length, communityCleaned, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
+  return { ok: !!saved, source, klipKept, skippedMonths: [...skipMonths], viaRoster: parsed.viaRoster, rosterSize: Object.keys(clientProgram).length, communityCleaned, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
 }
 
 // CLIENT ROSTER / DEMOGRAPHICS BRIDGE (10/1/26, per Brandon's "Clients by Demographic" export —
@@ -8201,6 +8263,18 @@ async delSRow(enc){
       return;
     }
 
+    // NEW (11/6/26): Klipfolio is now the guide for the Outcomes Dashboard's monthly contract
+    // numbers — feed the same raw rows into program_ledger (see olMergeKlipIntoProgramLedger).
+    if (parsed.rawRows && parsed.rawRows.length > 1) {
+      olMergeKlipIntoProgramLedger(parsed.rawRows).then(res => {
+        if (!res || !res.ok) { showSaveError('Klip billing saved for Director Hub, but the Outcomes Dashboard monthly numbers were not updated. Try re-uploading this file.'); return; }
+        recordImport('program_hub_ledger', { source_filename: parsed.sourceFilename || null, row_count: res.monthsTouched, period_label: parsed.period || null, data_through: parsed.periodEndDate || null });
+        const t2=document.createElement('div');
+        t2.textContent=`✓ Outcomes monthly numbers updated from Klipfolio — ${res.programsTouched} programs, ${res.monthsTouched} program-months`+(res.skippedMonths&&res.skippedMonths.length?` · kept saved totals for ${res.skippedMonths.join(', ')} (only partly in this file)`:'');
+        t2.style.cssText='position:fixed;top:60px;right:20px;max-width:420px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+        document.body.appendChild(t2); setTimeout(()=>t2.remove(),6000);
+      }).catch(err => { console.error('[olMergeKlipIntoProgramLedger]', err); showSaveError('Outcomes Dashboard monthly numbers were not updated from Klipfolio: ' + (err && err.message || err)); });
+    }
     recordImport('director_klip_pimsy', {
       source_filename: parsed.sourceFilename || S._lastFile || null,
       row_count: newEntries.length,
