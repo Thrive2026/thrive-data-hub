@@ -6917,6 +6917,7 @@ const OL_PIMSY_REF_MAP = {
 // to a single regular space, on both the incoming text and the dictionaries' own keys, before
 // matching. That holds regardless of which exact character is actually in the export, and means
 // no future duplicate-key workaround is needed for this reason again.
+const OL_JAIL_PKS = ['ccj','trumbull_jail','orianna'];
 function olNormDivText(s) {
   return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 }
@@ -6959,12 +6960,13 @@ function olLedgerMaxMonth(ledger){
   });
   return maxD || new Date();
 }
-function olLedgerUpsertMonth(ledger, pk, monthLabel, sessions, revenue, clientIdSet, minutes, newReferralSrc){
+function olLedgerUpsertMonth(ledger, pk, monthLabel, sessions, revenue, clientIdSet, minutes, newReferralSrc, extras){
   const key = pk+'||'+monthLabel;
   const prev = ledger.months[key] || {};
   ledger.months[key] = { ...prev, sessions, revenue, clientCount: clientIdSet ? clientIdSet.size : 0,
     minutes: minutes!==undefined ? minutes : prev.minutes,
-    newReferralSrc: newReferralSrc!==undefined ? newReferralSrc : prev.newReferralSrc };
+    newReferralSrc: newReferralSrc!==undefined ? newReferralSrc : prev.newReferralSrc,
+    ...(extras||{}) };
   if (clientIdSet && clientIdSet.size){
     if (!ledger.clientsSeen[pk]) ledger.clientsSeen[pk] = [];
     const seen = new Set(ledger.clientsSeen[pk]);
@@ -7001,7 +7003,8 @@ function olParseNotes(rows, trendMonths, clientProgram) {
       clients:new Set(), activeCl:new Set(),
       sudCl:new Set(), mhCl:new Set(),
       sessions:0, billable:0, minutes:0, revenue:0, f2f:0,
-      mSessions:{}, mClients:{}, mNewAdm:{}, mRevenue:{}, mMinutes:{}, mNewReferralSrc:{},
+      mSessions:{}, mClients:{}, mNewAdm:{}, mRevenue:{}, mMinutes:{}, mNewReferralSrc:{}, mStaff:{},
+      mTele:{}, mInPerson:{}, mPeerMinutes:{}, releases:{},
       firstSeen:{}, firstSeenSrc:{}, firstBillable:{}, admitDateByClient:{}, payers:{}, staff:{}
     };
     return progs[k];
@@ -7010,6 +7013,9 @@ function olParseNotes(rows, trendMonths, clientProgram) {
   const unmapped = new Set();
   const CTP_STAFF = ['Mario Ybarbo'];
   const seenNoteIds = new Set();
+  // NEW (11/6/26, per "Thrive Contract Data Point Sources for HUB"): every note per client (date,
+  // division, billable) so release/outreach/community-linkage can be worked out after the loop.
+  const clientNotes = {};
   for (const r of rows) {
     const noteNum = r['Note #'];
     if (noteNum) {
@@ -7022,8 +7028,17 @@ function olParseNotes(rows, trendMonths, clientProgram) {
     const refSrc   = (r['Referral Source'] || '').trim();
     const clientNum= r['Client #'];
     const isCTP = CTP_STAFF.includes(performer) || noteType === 'CTP Care Coordination';
-    const rosterPk = clientNum!=null && clientNum!=='' ? clientProgram[String(clientNum).trim()] : null;
-    let pk = rosterPk || (OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)] || (isCTP ? 'als_ctp' : OL_PIMSY_DIV_MAP_N[olNormDivText(div)]));
+    // Program rule (11/6/26): a note in a JAIL division (Cuyahoga County Jail, OneOhio, COSSAP/
+    // Oriana) always belongs to that jail program. Otherwise the client's roster program wins
+    // (court clients are filed under community divisions) — except a jail client's roster
+    // program is ignored here, because once released their community-division notes are
+    // Community services (the data-point guide's "moved to Division MH/SUD Community Services").
+    const divPk = OL_PIMSY_DIV_MAP_N[olNormDivText(div)];
+    let rosterPk = clientNum!=null && clientNum!=='' ? clientProgram[String(clientNum).trim()] : null;
+    let refPk = OL_PIMSY_REF_MAP_N[olNormDivText(refSrc)];
+    if (OL_JAIL_PKS.includes(rosterPk)) rosterPk = null;
+    if (OL_JAIL_PKS.includes(refPk)) refPk = null;
+    let pk = OL_JAIL_PKS.includes(divPk) ? divPk : (rosterPk || refPk || (isCTP ? 'als_ctp' : divPk));
     if (!pk || pk === 'archived') { if (div) unmapped.add(`div:${div}`); continue; }
     if (rosterPk) viaRoster++;
     const p = pGet(pk);
@@ -7051,11 +7066,27 @@ function olParseNotes(rows, trendMonths, clientProgram) {
     p.revenue += rowRev;
     const f2f = r['Face to Face'];
     if (f2f===true||f2f===1||String(f2f).toLowerCase()==='true') p.f2f++;
-    if (ml && trendMonths.includes(ml)) {
+    // UPDATED (11/6/26): monthly counts are BILLABLE notes only, matching the data-point guide
+    // (Notes filtered Billable = Yes; Klipfolio with Non Billable and Admin codes removed):
+    // service count, minutes, individuals engaged, staff. Telehealth = billing code with GT.
+    const codeStr = String(r['Billing Code'] || '');
+    const billCol = Object.prototype.hasOwnProperty.call(r, 'Billable') ? (bill===true||bill===1||String(bill).toLowerCase()==='true') : true;
+    const isBillable = billCol && !/^\s*\(admin\)/i.test(codeStr) && !/non-?\s*billable/i.test(codeStr);
+    if (clientNum && d && !isNaN(d)) {
+      const ck = String(clientNum).trim();
+      (clientNotes[ck] = clientNotes[ck] || []).push({ d, community: divPk === 'community', billable: isBillable });
+      if (OL_JAIL_PKS.includes(pk) && /final|transition/i.test(noteType)) {
+        if (!p.releases[ck] || d > p.releases[ck]) p.releases[ck] = d;
+      }
+    }
+    if (ml && trendMonths.includes(ml) && isBillable) {
       p.mSessions[ml] = (p.mSessions[ml] || 0) + 1;
       p.mRevenue[ml] = (p.mRevenue[ml] || 0) + rowRev;
       p.mMinutes[ml] = (p.mMinutes[ml] || 0) + rowMinutes;
       if (clientNum) { if (!p.mClients[ml]) p.mClients[ml]=new Set(); p.mClients[ml].add(clientNum); }
+      if (performer) { if (!p.mStaff[ml]) p.mStaff[ml]=new Set(); p.mStaff[ml].add(performer); }
+      if (/\bGT\b/.test(codeStr)) p.mTele[ml] = (p.mTele[ml] || 0) + 1; else p.mInPerson[ml] = (p.mInPerson[ml] || 0) + 1;
+      if (/H0038/.test(codeStr)) p.mPeerMinutes[ml] = (p.mPeerMinutes[ml] || 0) + rowMinutes;
     }
     const payer = (r['Insurance Co.'] || 'Unknown').trim();
     p.payers[payer] = (p.payers[payer] || 0) + 1;
@@ -7078,7 +7109,37 @@ function olParseNotes(rows, trendMonths, clientProgram) {
       }
     }
   }
-  return { progs, minD, maxD, unmapped:[...unmapped], total:rows.length, viaRoster };
+  // Jail release cohort (11/6/26, data-point guide O3): a client is "released" in the month of
+  // their Transition / Final note in that jail program. For each release month:
+  //   released        = clients released that month
+  //   outreach3d      = had any note 1–3 days after release
+  //   outreach2wk     = had any note 4–14 days after release
+  //   outreach1mo     = had any note 15–31 days after release
+  //   linkedCommunity = had a billable Community-division note any time after release
+  // Only written for programs that have at least one Transition/Final note in the file.
+  Object.values(progs).forEach(p => {
+    const rel = Object.entries(p.releases || {});
+    if (!rel.length) return;
+    p.mRelease = {};
+    rel.forEach(([ck, R]) => {
+      const ml = olMLabel(R); if (!ml || !trendMonths.includes(ml)) return;
+      const m = p.mRelease[ml] = p.mRelease[ml] || { released:0, outreach3d:0, outreach2wk:0, outreach1mo:0, linkedCommunity:0 };
+      m.released++;
+      let o3=false, o14=false, o31=false, linked=false;
+      (clientNotes[ck] || []).forEach(n => {
+        const days = (n.d - R) / 86400000;
+        if (days <= 0) return;
+        if (days <= 3) o3 = true; else if (days <= 14) o14 = true; else if (days <= 31) o31 = true;
+        if (n.community && n.billable) linked = true;
+      });
+      if (o3) m.outreach3d++; if (o14) m.outreach2wk++; if (o31) m.outreach1mo++; if (linked) m.linkedCommunity++;
+    });
+  });
+  // First note per client (any note, billable or not — outreach attempts count) for the
+  // referral → first contact measure computed in the ledger merge.
+  const firstNoteByClient = {};
+  Object.entries(clientNotes).forEach(([ck, arr]) => { firstNoteByClient[ck] = arr.map(n => n.d).sort((a,b)=>a-b); });
+  return { progs, minD, maxD, unmapped:[...unmapped], total:rows.length, viaRoster, noteDatesByClient: firstNoteByClient };
 }
 // Converts the array-of-arrays rows this hub already extracted for the Linkage/Courts
 // parsers (header row first) into the array-of-objects shape olParseNotes() (and outcomes.html's
@@ -7137,6 +7198,27 @@ async function olReadProgramLedger(){
   ledger.clientsSeen = ledger.clientsSeen || {};
   return ledger;
 }
+// NEW (11/6/26): per-program, per-month counts from the Demographics roster's own dates —
+// admitted = Date of Admission in that month, discharged = discharge/termination date in that
+// month. Rebuilt from clientRosterCurrent[pk].clientDates on every Notes AND Demographics upload,
+// so it's current whichever file goes in last. Outcomes Dashboard reads ledger.rosterMonthly for
+// its "New Referrals" and "Clients Discharged" monthly rows.
+function olBuildRosterMonthly(ledger){
+  const out = {};
+  Object.entries(ledger.clientRosterCurrent || {}).forEach(([pk, r]) => {
+    Object.values((r && r.clientDates) || {}).forEach(dt => {
+      [['admission','admitted'],['discharge','discharged'],['referral','referred']].forEach(([kind, field]) => {
+        if (!dt || !dt[kind]) return;
+        const ml = olMLabel(new Date(dt[kind] + 'T12:00:00'));
+        if (!ml) return;
+        if (!out[pk]) out[pk] = {};
+        if (!out[pk][ml]) out[pk][ml] = { admitted:0, discharged:0, referred:0 };
+        out[pk][ml][field]++;
+      });
+    });
+  });
+  ledger.rosterMonthly = out;
+}
 function olMergeNotesIntoProgramLedger(objRows){
   return olLedgerSerialized(() => _olMergeNotesIntoProgramLedgerNow(objRows));
 }
@@ -7170,14 +7252,91 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
     });
     communityCleaned = before - ledger.clientsSeen.community.length;
   }
+  // FIX (11/6/26, "CCJ July 2026 shows 1"): each program/month in the file REPLACES what's saved,
+  // so a few stray notes from a month the export didn't really cover (late-signed notes, or an
+  // export starting mid-month) wiped out that month's real totals — an Aug 1–today export with one
+  // July-dated note turned CCJ's July into 1 session. Now months at the START of the file are only
+  // written when the file actually covers them:
+  //   - leading months with very few notes (< 5% of the file's busiest month, min 5) are skipped;
+  //   - the first real month is skipped if it starts after the 7th (partial) and data is already
+  //     saved for it.
+  // Months after that are written as before, so corrections (e.g. Community after the 11/5 court
+  // fix) still replace old numbers. The newest month is always written (it's simply in progress).
+  const MONTH_ABBR_=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const mSort = m => { const [mo,yr]=m.split(' '); return (2000+parseInt(yr,10))*12+MONTH_ABBR_.indexOf(mo); };
+  const fileMonthCount = {}, fileMonthFirstDay = {};
+  objRows.forEach(r => {
+    const v = r['Service Date']; const d = v instanceof Date ? v : (v ? new Date(v) : null);
+    const ml = olMLabel(d); if (!ml || !trendMonths.includes(ml)) return;
+    fileMonthCount[ml] = (fileMonthCount[ml]||0) + 1;
+    const day = d.getDate(); if (fileMonthFirstDay[ml]==null || day < fileMonthFirstDay[ml]) fileMonthFirstDay[ml] = day;
+  });
+  const fileMonths = Object.keys(fileMonthCount).sort((a,b)=>mSort(a)-mSort(b));
+  const busiest = Math.max(0, ...Object.values(fileMonthCount));
+  const strayLimit = Math.max(5, busiest * 0.05);
+  const skipMonths = new Set();
+  const savedMonths = new Set(Object.keys(ledger.months||{}).map(k => k.split('||')[1]));
+  for (let i = 0; i < fileMonths.length - 1; i++) {
+    const m = fileMonths[i];
+    if (fileMonthCount[m] < strayLimit) { skipMonths.add(m); continue; }
+    if (fileMonthFirstDay[m] > 7 && savedMonths.has(m)) skipMonths.add(m);
+    break;
+  }
+  // NEW (11/6/26) — "8 engaged (3 new)": newEngaged = clients with a note this month who are
+  // NEW to the program this month. A client counts as new if their Demographics Date of Admission
+  // falls in this month; if no admission date is on file, if this month is their first note in
+  // this file AND they'd never been seen in this program before this upload.
+  // hoursPerStaffWeek = note minutes ÷ 60 ÷ staff with a note that month ÷ weeks covered (the
+  // newest month only counts days through the file's last Service Date).
+  const admissionByClient = {}, referralDateByClient = {};
+  Object.values(ledger.clientRosterCurrent || {}).forEach(r => {
+    Object.entries((r && r.clientDates) || {}).forEach(([c, dt]) => {
+      const k = String(c).trim();
+      const start = dt && (dt.admission || dt.referral);
+      if (start) admissionByClient[k] = olMLabel(new Date(start + 'T12:00:00'));
+      if (dt && dt.referral) referralDateByClient[k] = new Date(dt.referral + 'T12:00:00');
+    });
+  });
+  const priorSeen = {};
+  Object.entries(ledger.clientsSeen || {}).forEach(([pk, arr]) => { priorSeen[pk] = new Set((arr||[]).map(c => String(c).trim())); });
+  const lastFileMonth = fileMonths[fileMonths.length - 1];
+  const lastFileDay = parsed.maxD ? parsed.maxD.getDate() : null;
   Object.entries(parsed.progs).forEach(([pk, p]) => {
     Object.keys(p.mSessions||{}).forEach(month => {
+      if (skipMonths.has(month)) return;
       const sess = p.mSessions[month] || 0;
       const rev  = Math.round((p.mRevenue && p.mRevenue[month]) || 0);
       const clientSet = p.mClients[month] || new Set();
       const minutes = (p.mMinutes && p.mMinutes[month]) || 0;
       const newReferralSrc = (p.mNewReferralSrc && p.mNewReferralSrc[month]) || undefined;
-      olLedgerUpsertMonth(ledger, pk, month, sess, rev, clientSet, minutes, newReferralSrc);
+      let newEngaged = 0;
+      clientSet.forEach(c => {
+        const k = String(c).trim();
+        const adm = admissionByClient[k];
+        if (adm) { if (adm === month) newEngaged++; }
+        else if (olMLabel(p.firstSeen[c]) === month && !(priorSeen[pk] && priorSeen[pk].has(k))) newEngaged++;
+      });
+      const [mo, yr] = month.split(' ');
+      const daysInMonth = new Date(2000 + parseInt(yr,10), MONTH_ABBR_.indexOf(mo) + 1, 0).getDate();
+      const days = (month === lastFileMonth && lastFileDay) ? lastFileDay : daysInMonth;
+      const staffN = p.mStaff[month] ? p.mStaff[month].size : 0;
+      const hoursPerStaffWeek = staffN && days ? Math.round((minutes / 60) / staffN / (days / 7) * 10) / 10 : null;
+      const extras = { newEngaged, staffCount: staffN, hoursPerStaffWeek,
+        teleVisits: p.mTele[month] || 0, inPersonVisits: p.mInPerson[month] || 0,
+        directPeerHours: Math.round(((p.mPeerMinutes[month] || 0) / 60) * 10) / 10 };
+      if (p.mRelease) Object.assign(extras, p.mRelease[month] || { released:0, outreach3d:0, outreach2wk:0, outreach1mo:0, linkedCommunity:0 });
+      // Referral → first contact (data-point guide, Trumbull Probation): clients this program
+      // REFERRED this month (Demographics Date of Referral), days to their first note of any kind
+      // on/after that date. Only for referrals on/after the file's first Service Date, so a first
+      // contact before the file started can't be missed.
+      const lags = [];
+      Object.entries(referralDateByClient).forEach(([k, rd]) => {
+        if ((ledger.clientProgram||clientProgram)[k] !== pk || olMLabel(rd) !== month || !parsed.minD || rd < parsed.minD) return;
+        const first = (parsed.noteDatesByClient[k] || []).find(d => d >= new Date(rd.getFullYear(), rd.getMonth(), rd.getDate()));
+        if (first) lags.push(Math.round((first - rd) / 86400000));
+      });
+      if (lags.length) { extras.avgDaysReferralToFirstContact = Math.round(lags.reduce((a,b)=>a+b,0) / lags.length * 10) / 10; extras.referralToContactN = lags.length; }
+      olLedgerUpsertMonth(ledger, pk, month, sess, rev, clientSet, minutes, newReferralSrc, extras);
     });
     // PHASE 2 (9/16/26): snapshot this upload's per-program client sets — Total Admitted
     // (clients), Active Caseload (activeCl), and the SUD/MH split community's dashboard
@@ -7194,8 +7353,9 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
       uploadedAt: new Date().toISOString(),
     };
   });
+  olBuildRosterMonthly(ledger);
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
-  return { ok: !!saved, viaRoster: parsed.viaRoster, rosterSize: Object.keys(clientProgram).length, communityCleaned, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
+  return { ok: !!saved, skippedMonths: [...skipMonths], viaRoster: parsed.viaRoster, rosterSize: Object.keys(clientProgram).length, communityCleaned, monthsTouched: Object.values(parsed.progs).reduce((n,p)=>n+Object.keys(p.mSessions||{}).length,0), programsTouched: Object.keys(parsed.progs).length };
 }
 
 // CLIENT ROSTER / DEMOGRAPHICS BRIDGE (10/1/26, per Brandon's "Clients by Demographic" export —
@@ -7231,6 +7391,7 @@ async function _olMergeNotesIntoProgramLedgerNow(objRows){
 // upload, surfaced via admissionColumnFound/dischargeColumnFound below rather than silently
 // assumed. If Brandon reports a real header that still isn't matching, add it to the list below.
 const OL_ADMISSION_HEADER_CANDIDATES = ['date of admission', 'admission date', 'admit date'];
+const OL_REFERRAL_HEADER_CANDIDATES = ['date of referral', 'referral date', 'referred date']; // NEW 11/6/26
 const OL_DISCHARGE_HEADER_CANDIDATES = ['date of discharge', 'discharge date', 'date of termination', 'termination date', 'term date', 'date discharged', 'discharge/term date'];
 function olFindDateCol(idx, candidates) {
   for (const c of candidates) { if (idx[c] != null) return idx[c]; }
@@ -7262,6 +7423,7 @@ function olParseDemographics(rows) {
   }
   const cAdmission = olFindDateCol(idx, OL_ADMISSION_HEADER_CANDIDATES);
   const cDischarge = olFindDateCol(idx, OL_DISCHARGE_HEADER_CANDIDATES);
+  const cReferral = olFindDateCol(idx, OL_REFERRAL_HEADER_CANDIDATES);
   const progs = {}; // pk -> { activeClients:Set, totalClients:Set, dates:{clientNum:{admission,discharge}} }
   const clientProgram = {}; // NEW 11/5/26: clientNum -> pk for EVERY client (active or not) — see olParseNotes()
   const pGet = k => { if(!progs[k]) progs[k] = { activeClients:new Set(), totalClients:new Set(), dates:{} }; return progs[k]; };
@@ -7283,11 +7445,12 @@ function olParseDemographics(rows) {
     clientProgram[clientNum] = pk;
     p.totalClients.add(clientNum);
     if (isActive) { p.activeClients.add(clientNum); activeRows++; }
-    if (cAdmission != null || cDischarge != null) {
+    if (cAdmission != null || cDischarge != null || cReferral != null) {
       const admission = cAdmission != null ? olDateToISO(row[cAdmission]) : null;
       const discharge = cDischarge != null ? olDateToISO(row[cDischarge]) : null;
-      if (admission || discharge) {
-        p.dates[clientNum] = { admission, discharge };
+      const referral = cReferral != null ? olDateToISO(row[cReferral]) : null;
+      if (admission || discharge || referral) {
+        p.dates[clientNum] = { admission, discharge, referral };
         if (admission) admissionDatesFound++;
         if (discharge) dischargeDatesFound++;
       }
@@ -7322,6 +7485,7 @@ async function _olMergeDemographicsIntoProgramLedgerNow(parsed) {
       clientDates: p.dates || {},
     };
   });
+  olBuildRosterMonthly(ledger);
   const saved = await db.upsert('appdata',{key:'program_ledger',value:JSON.stringify(ledger)},'key');
   return { ok: !!saved, programsTouched: Object.keys(parsed.progs).length };
 }
@@ -8442,7 +8606,7 @@ async delSRow(enc){
           const _noRoster=!res.rosterSize;
           _t.textContent=_noRoster
             ? '⚠ Outcomes ledger updated, but no client roster is on file — court-program notes (ADC, Mended Reeds, ALS, Trumbull Probation/Family Court) were counted under Community. Upload "Clients by Demographic" first, then re-upload this Notes file.'
-            : `✓ Outcomes ledger updated — ${res.viaRoster} notes assigned to programs from the client roster`+(res.communityCleaned?` · ${res.communityCleaned} court clients removed from Community's client list`:'');
+            : `✓ Outcomes ledger updated — ${res.viaRoster} notes assigned to programs from the client roster`+(res.communityCleaned?` · ${res.communityCleaned} court clients removed from Community's client list`:'')+(res.skippedMonths&&res.skippedMonths.length?` · kept saved totals for ${res.skippedMonths.join(', ')} (only partly in this file)`:'');
           _t.style.cssText='position:fixed;top:20px;right:20px;max-width:420px;background:'+(_noRoster?'#92400E':'#1B5E20')+';color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
           document.body.appendChild(_t);setTimeout(()=>_t.remove(),_noRoster?12000:5000);
         }else{
