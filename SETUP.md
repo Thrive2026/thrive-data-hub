@@ -64,6 +64,10 @@ Billable hours, caseload, outreach % and engagement % are now computed in this h
 - **Checked against the old reports (11/9/26):** hours matched the 10/10–10/23 report exactly for 66 of 73 staff. The differences were notes released after that report was run. Engagement flags matched for 93–99% of clients, with misses from late-released notes.
 - **UKG** (PTO and overtime) isn't part of this. The hubs don't use PTO today.
 
+### What each hub has (added 11/9/26)
+
+The checklist has two tabs. **What to upload** lists each file. **What each hub has** shows one card per hub (Community, Hospital, Courts & Jail, Linkage, Director, Clinical Director, Executive, Outcomes, Flagged Notes Tracker, BD Dashboard, Data & Staff Hub). Each card lists every dataset that hub shows, how far its data goes, and which upload it comes from, with a green, amber or red dot. The hub's badge (Up to date / Due soon / Old or missing data) is its worst dataset, and hubs with old data are listed first. A stale dataset has an **Upload ↓** button that jumps to the right upload box. To change which hub shows what, edit `HUB_FEEDS`, or `HUB_DATASETS` for the dataset names, in `index.html`.
+
 ## Late Notes from raw data (added 11/9/26)
 
 The **Late Notes 2026 workbook** isn't needed anymore. Its upload box has been removed here and in Community Hub. Late notes are calculated from the Pimsy Notes upload using the same rule as the workbook:
