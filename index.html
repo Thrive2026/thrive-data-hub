@@ -4699,6 +4699,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
 
   // ── Billable hours, biweekly ──
   let start = CR_HOURS_ANCHOR;
+  const hoursOld = [];
   while(crAddDays(start,14) <= todayISO) start = crAddDays(start,14);   // start of the current (incomplete) period
   for(let i=1;i<=CR_LOOKBACK_PERIODS;i++){
     const ps = crAddDays(start, -14*i), pe = crAddDays(ps, 13);
@@ -4710,7 +4711,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
     const noMin = prod.filter(r=>typeof r.m!=='number');
     // A handful of minute-less rows can be notes voided in Pimsy after an older upload (they're
     // never re-exported, so never refreshed) — tolerate up to 2%, skip the period beyond that.
-    if(noMin.length > Math.max(2, prod.length*0.02)){ out.skipped.push(`${label}: ${noMin.length} billable notes came from an older upload without minutes — re-upload a Notes export covering this period`); continue; }
+    if(noMin.length > Math.max(2, prod.length*0.02)){ hoursOld.push(ps); continue; }
     if(noMin.length) out.skipped.push(`${label}: computed, but ${noMin.length} older note${noMin.length!==1?'s':''} without minutes were left out`);
     const mins = {};
     inP.forEach(r=>{ const id=staffOf(r.by); if(id==null || (hoursStaff && !hoursStaff.has(id))) return; mins[id]=(mins[id]||0) + (crIsProductive(r.code) && typeof r.m==='number' ? r.m : 0); });
@@ -4718,6 +4719,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
     Object.entries(mins).forEach(([id,v])=>{ per[id] = Math.round(v/60*100)/100; });
     if(Object.keys(per).length){ out.hours[pe] = per; out.computed.push(label); }
   }
+  if(hoursOld.length) out.skipped.push(`Billable hours: ${hoursOld.length} pay period${hoursOld.length!==1?'s':''} (from ${hoursOld.sort()[0]}) need a Notes export re-uploaded that covers them`);
 
   // ── Late notes, weekly (Sat–Fri, keyed by the Friday, like the old "10.24-10.30" tabs) ──
   // Same rule as the Late Notes 2026 workbook: a peer support note (H0038, H0038 GT, H0038 HM)
@@ -4740,12 +4742,12 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       ps.forEach(r=>{ const id=staffOf(r.by); if(id==null) return; cnt[id]=(cnt[id]||0) + ((typeof r.l==='number' && r.l>48) ? 1 : 0); });
       if(Object.keys(cnt).length){ out.late[we] = cnt; out.computed.push(label); }
     }
-    if(lateOld.length) out.skipped.push(`Late notes: ${lateOld.length} earlier week${lateOld.length!==1?'s':''} (from ${lateOld.sort()[0]}) came from uploads made before start/created times were saved — re-upload a Notes export covering them to fill those in`);
+    if(lateOld.length) out.skipped.push(`Late notes: ${lateOld.length} week${lateOld.length!==1?'s':''} (from ${lateOld.sort()[0]}) need a Notes export re-uploaded that covers them`);
   }
 
   // ── Caseload / outreach / engagement, weekly (Mon–Sun) ──
   const snapDates = Object.keys(snapshots||{}).sort();
-  if(!snapDates.length){ out.skipped.push('Caseload engagement: no Renewals upload on file since this feature was added — upload the Renewals export'); }
+  if(!snapDates.length){ out.skipped.push('Caseload & engagement: waiting on a Renewals upload'); }
   else{
     const td = new Date(todayISO+'T00:00:00Z');
     const dow = td.getUTCDay();                              // 0=Sun
@@ -4842,16 +4844,16 @@ async function recomputeCommunityFromRaw(opts){
       lKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.late[k]).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), lateNotes:n}; }); S.pd[k]._lnImported = true; });
       const ok = await sv('p', S.pd);
       if(!ok) return res;
-      if(hKeys.length) recordImport('roster_hours', {row_count:hKeys.reduce((a,k)=>a+Object.keys(res.hours[k]).length,0), period_label:hKeys.sort().pop(), data_through:hKeys.sort().pop(), source_filename:'computed from Pimsy Notes'});
-      if(lKeys.length) recordImport('roster_late_notes', {row_count:lKeys.reduce((a,k)=>a+Object.keys(res.late[k]).length,0), period_label:lKeys.sort().pop(), data_through:lKeys.sort().pop(), source_filename:'computed from Pimsy Notes'});
-      if(cKeys.length) recordImport('roster_caseload', {row_count:cKeys.reduce((a,k)=>a+Object.keys(res.caseload[k]).length,0), period_label:cKeys.sort().pop(), data_through:cKeys.sort().pop(), source_filename:'computed from Pimsy Notes + Renewals'});
+      if(hKeys.length) recordImport('roster_hours', {row_count:hKeys.reduce((a,k)=>a+Object.keys(res.hours[k]).length,0), period_label:hKeys.slice().sort().pop(), data_through:hKeys.slice().sort().pop(), source_filename:'computed from Pimsy Notes'});
+      if(lKeys.length) recordImport('roster_late_notes', {row_count:lKeys.reduce((a,k)=>a+Object.keys(res.late[k]).length,0), period_label:lKeys.slice().sort().pop(), data_through:lKeys.slice().sort().pop(), source_filename:'computed from Pimsy Notes'});
+      if(cKeys.length) recordImport('roster_caseload', {row_count:cKeys.reduce((a,k)=>a+Object.keys(res.caseload[k]).length,0), period_label:cKeys.slice().sort().pop(), data_through:cKeys.slice().sort().pop(), source_filename:'computed from Pimsy Notes + Renewals'});
     }
     const t=document.createElement('div');
     const lines = [];
-    if(hKeys.length) lines.push(`✓ Billable hours updated for ${hKeys.length} period${hKeys.length!==1?'s':''} (latest ending ${hKeys.sort().pop()})`);
-    if(lKeys.length) lines.push(`✓ Late notes updated for ${lKeys.length} week${lKeys.length!==1?'s':''} (latest ending ${lKeys.sort().pop()})`);
-    if(cKeys.length) lines.push(`✓ Caseload & engagement updated for ${cKeys.length} week${cKeys.length!==1?'s':''} (latest ending ${cKeys.sort().pop()})`);
-    if(res.skipped.length) lines.push('Not updated: '+res.skipped.join(' · '));
+    if(hKeys.length) lines.push(`✓ Billable hours updated for ${hKeys.length} period${hKeys.length!==1?'s':''} (latest ending ${hKeys.slice().sort().pop()})`);
+    if(lKeys.length) lines.push(`✓ Late notes updated for ${lKeys.length} week${lKeys.length!==1?'s':''} (latest ending ${lKeys.slice().sort().pop()})`);
+    if(cKeys.length) lines.push(`✓ Caseload & engagement updated for ${cKeys.length} week${cKeys.length!==1?'s':''} (latest ending ${cKeys.slice().sort().pop()})`);
+    if(res.skipped.length) lines.push('Still waiting:\n• '+res.skipped.join('\n• '));
     if(!lines.length) lines.push('Nothing new to compute from the notes on file.');
     t.textContent = lines.join('\n');
     t.style.cssText='position:fixed;bottom:20px;right:20px;max-width:440px;white-space:pre-line;background:'+(res.skipped.length&&!hKeys.length&&!cKeys.length&&!lKeys.length?'#92400E':'#1B5E20')+';color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
@@ -7429,10 +7431,10 @@ function olParseNotes(rows, trendMonths, clientProgram) {
       if (seenNoteIds.has(noteNum)) continue;
       seenNoteIds.add(noteNum);
     }
-    const div      = (r['Division'] || '').trim();
-    const performer= (r['Performed By'] || '').trim();
-    const noteType = (r['Note Type'] || '').trim();
-    const refSrc   = (r['Referral Source'] || '').trim();
+    const div      = String(r['Division'] ?? '').trim();
+    const performer= String(r['Performed By'] ?? '').trim();
+    const noteType = String(r['Note Type'] ?? '').trim();
+    const refSrc   = String(r['Referral Source'] ?? '').trim();
     const clientNum= r['Client #'];
     const isCTP = CTP_STAFF.includes(performer) || noteType === 'CTP Care Coordination';
     // Program rule (11/6/26): a note in a JAIL division (Cuyahoga County Jail, OneOhio, COSSAP/
@@ -7502,9 +7504,9 @@ function olParseNotes(rows, trendMonths, clientProgram) {
         if (performer) { if (!p.mPeerStaff[ml]) p.mPeerStaff[ml]=new Set(); p.mPeerStaff[ml].add(performer); }
       }
     }
-    const payer = (r['Insurance Co.'] || 'Unknown').trim();
+    const payer = String(r['Insurance Co.'] ?? '').trim() || 'Unknown';
     p.payers[payer] = (p.payers[payer] || 0) + 1;
-    const staff = (r['Performed By'] || '').trim();
+    const staff = String(r['Performed By'] ?? '').trim();
     if (staff) {
       if (!p.staff[staff]) p.staff[staff]={sessions:0,clients:new Set(),billable:0};
       p.staff[staff].sessions++;
@@ -9221,7 +9223,15 @@ async delSRow(enc){
       // from a possibly-stale copy of the same period.
       const protectExisting = lkMonthCount > 2;
       Object.entries(lkMonths).forEach(([key,snap])=>{
-        if(protectExisting && S.linkageHistory[key]){ lkSkipped++; return; }
+        if(protectExisting && S.linkageHistory[key]){
+          lkSkipped++;
+          // 11/9/26 — this month's Linkage snapshot is kept as-is (never-downgrade rule), but the
+          // raw pool still takes this file's notes so minutes (m) and hours late (l) reach every
+          // note. Hours, engagement and late notes are computed from the pool, and skipped
+          // periods otherwise never fill in when the re-upload is a wide (3+ month) export.
+          S.linkageNotesRaw[key] = {...(S.linkageNotesRaw[key]||{}), ...(rawByMonth[key]||{})};
+          return;
+        }
         if(protectExisting){
           // Wide historical file, genuinely new month — nothing to merge into yet.
           S.linkageHistory[key] = {...snap, importedAt:new Date().toISOString()};
