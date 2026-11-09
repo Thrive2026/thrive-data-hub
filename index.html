@@ -6944,6 +6944,23 @@ function parseLinkageNotesExport(rows){
     if(!isNaN(n) && typeof v!=='string') return new Date(Date.UTC(1899,11,30) + Math.floor(n)*86400000); // floor, not round - avoids rolling a PM timestamp into the next day
     const d=new Date(v); return isNaN(d)?null:d;
   }
+  // 11/9/26 — guard against a stitched file where one chunk came from an export with a different
+  // column layout (seen: a week pasted in without the "Ins. #" column, so every value after
+  // Client # sat one column to the left — billing codes read as location codes, durations as
+  // 0/1, Performed By as Released By). Those rows silently produced wrong hours, so stop here.
+  {
+    const looksCode = v => /^\(/.test(String(v==null?'':v).trim());
+    const shifted = [];
+    for(let i=1;i<rows.length;i++){
+      const row=rows[i]; if(!row) continue;
+      const v=row[colCode]; if(v==null||v==='') continue;
+      if(!looksCode(v) && (looksCode(row[colCode-1]) || looksCode(row[colCode+1]))) shifted.push(row);
+    }
+    if(shifted.length){
+      const ds = shifted.map(r=>toDate(r[colDate])).filter(Boolean).map(d=>d.toISOString().slice(0,10)).sort();
+      throw new Error(`${shifted.length} rows are shifted by a column (service dates ${ds[0]||'?'} to ${ds[ds.length-1]||'?'}). This usually means the file was pasted together from exports with different columns. Nothing was imported. Re-export that date range from Pimsy in one piece, or send the file to Claude to repair.`);
+    }
+  }
   // Flatten every row into a minimal, plain-field object up front — this is the shape
   // computeLinkageMonthFromRows() consumes, and the same shape (serialized) that gets persisted
   // per month in S.linkageNotesRaw for future uploads to merge into.
