@@ -1,6 +1,6 @@
 # Thrive Data & Staff Hub
 
-*Updated 10/29/26.*
+*Updated 11/9/26.*
 
 A single-file app (`index.html`) that holds the shared staff roster and the central data uploads for the Thrive Tools ecosystem. It runs as a static site on Render and redeploys automatically from this repo's `main` branch.
 
@@ -50,6 +50,35 @@ Each post-cutover month in `linkage_history` also gets `nonBk.converted` and `no
 - **Data requests** use the signed-in person's own login rather than the public key, so the hub is ready for the appdata lockdown.
 - **Crisis Center staff** are view-only here. Their records are edited in the Crisis Center hub (decision 9/23/26).
 
+## Community hours and engagement from raw data (added 11/9/26)
+
+Billable hours, caseload, outreach % and engagement % are now computed in this hub from uploads you already make. The **Productivity workbook** and the **Caseload Engagement report** are no longer needed. Both upload boxes have been removed, here and in Community Hub. Enter Data now shows an "Automatic — nothing to upload" card with how current the hours and engagement data are, plus **↻ Recompute now**.
+
+- **Billable hours** come from the Pimsy Notes upload. Every note counts except Non-billable, ADMIN, OTR- Linkage, CTP ADMIN/Engagement/In-Reach, ITP and Phone. Periods run Saturday to Friday, two weeks at a time (e.g. 10/24–11/06), and are stored under the period's end date, as the old tabs were. The Notes pool now keeps each note's Duration in Minutes (`m`) for this.
+- **Caseload** comes from the Renewals upload: each client counts toward their Peer Supporter. Each Renewals upload saves a snapshot to the `appdata` key `caseload_snapshots` (client numbers one-way hashed, last 8 kept). A client whose first note is after the week isn't counted in that week's caseload.
+- **Outreach** means the client had any note that week, from anyone. **Engagement** means the client had an H0038 or H0036 note that week. Weeks run Monday to Sunday and are stored under the Sunday.
+- **Late notes count** (Brandon, 11/9/26). A note released late doesn't count against anyone's hours or engagement. Lateness shows up only in the Late Notes metric. Each upload recomputes the last 6 two-week periods and the last 8 weeks, so late notes are picked up when they arrive.
+- **When it runs:** automatically after a Pimsy Notes import and after a Renewals import, or with **↻ Recompute now** on Enter Data. A toast lists what was updated and anything skipped, with the reason.
+- **Upload Renewals early in the week.** Caseload for a week uses the first Renewals snapshot taken on or after that week ends, within 14 days.
+- **First run after deploying:** notes uploaded before 11/9/26 don't have minutes, so a period is skipped until a Notes export covering it is re-uploaded. Re-upload one export covering 10/24 onward.
+- **Checked against the old reports (11/9/26):** hours matched the 10/10–10/23 report exactly for 66 of 73 staff. The differences were notes released after that report was run. Engagement flags matched for 93–99% of clients, with misses from late-released notes.
+- **UKG** (PTO and overtime) isn't part of this. The hubs don't use PTO today.
+
+## Late Notes from raw data (added 11/9/26)
+
+The **Late Notes 2026 workbook** isn't needed anymore. Its upload box has been removed here and in Community Hub. Late notes are calculated from the Pimsy Notes upload using the same rule as the workbook:
+
+- Peer support notes only (H0038, H0038 GT, H0038 HM).
+- "Hours late starting the note" = **Created Date minus Start Note By Date**. Over 48 hours counts as late.
+- Grouped by session date into Saturday–Friday weeks, stored under the Friday (as the old "10.24-10.30" tabs were).
+- Each note keeps its hours late in the notes pool as `l`. A note that hasn't been started yet can't be judged; it's counted on a later upload, because the last 8 weeks are recalculated every time.
+- Notes uploaded before 11/9/26 don't have this field, so earlier weeks are skipped until a Notes export covering them is re-uploaded.
+- **Check after deploying:** compare the calculated week of 10/24–10/30 with the "10.24-10.30" tab of the old workbook. On 11/9/26 the formula matched the workbook's own columns, but no Notes export covering that week was on hand for a person-by-person check.
+
+## Upload checklist (added 11/9/26)
+
+The top of **Enter Data** is now a checklist of every file that still has to be uploaded by hand. Each row shows how often it's due, when it was last uploaded and by whom, how far the data goes, a Fresh / Due / Overdue / Never uploaded badge, where to get the file, and which hubs it feeds. Overdue files are listed first. **Upload ↓** jumps to that file's upload box. Below the list is a section of what's now automatic and no longer needs an upload. Status comes from the same import registry as the Data Catalog tab, so the two always agree. To add or change a row, edit `UPLOAD_CHECKLIST` in `index.html`. Renewals is now due weekly instead of every two weeks, because caseload for engagement % depends on it. TripLog and JotForm mileage aren't on the checklist yet because their uploads don't record when they were last done.
+
 ## Gotchas
 
 - Redeploying with new people added to `SDEF` only adds new IDs to the live roster. It never overwrites someone who's already there. To correct an existing person, edit them in the app, or use a one-off migration script for bulk fixes.
@@ -62,5 +91,6 @@ Each post-cutover month in `linkage_history` also gets `nonBk.converted` and `no
 - The `thrive-hub` landing page (Data & Staff Hub tile)
 - The Director Hub
 - The BH Linkage Hub (Optum referral upload link)
+
 
 
