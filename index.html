@@ -4667,6 +4667,9 @@ const CR_HOURS_ANCHOR = '2026-10-10';   // a real period start (Sat); periods ru
 const CR_LOOKBACK_PERIODS = 6;          // biweekly periods recomputed per run
 const CR_LOOKBACK_WEEKS = 8;            // weekly engagement periods recomputed per run
 const CR_SNAPSHOTS_KEPT = 8;
+// Periods ending on/after this date only ever come from this computation (the report uploads
+// were retired), so a partial result there can be safely cleared when a gap is found.
+const CR_RAW_SINCE = '2026-10-24';
 const CR_NONBILLABLE = new Set(['non-billable','nonbillable','admin','otr- linkage','otr-linkage','ctp admin','ctp engagement','ctp in-reach','itp','phone','none','']);
 function crCode(raw){
   const s = String(raw==null?'':raw).trim();
@@ -4675,6 +4678,13 @@ function crCode(raw){
 }
 function crIsProductive(code){ return !CR_NONBILLABLE.has(code.toLowerCase()); }
 function crIsEngagement(code){ return /^H003[68]\b/i.test(code); }
+// Weekdays (Mon–Fri) in [ws, we] with no notes at all in the pool — i.e. a gap between uploads.
+// Org-wide, every weekday has notes, so a missing weekday means that stretch was never uploaded.
+function crMissingWeekdays(daySet, ws, we){
+  const miss = [];
+  for(let d=ws; d<=we; d=crAddDays(d,1)){ const w=new Date(d+'T00:00:00Z').getUTCDay(); if(w>=1 && w<=5 && !daySet.has(d)) miss.push(d); }
+  return miss;
+}
 function crAddDays(iso, n){ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
 
 // pool: {monthKey: {noteKey: {d, b, c, cl, m}}}; snapshots: {YYYY-MM-DD: {clientHash: staffId}}
@@ -4692,8 +4702,10 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       if(!maxD || d>maxD) maxD=d;
     });
   });
-  const out = {hours:{}, caseload:{}, late:{}, skipped:[], computed:[]};
+  const out = {hours:{}, caseload:{}, late:{}, skipped:[], computed:[], gaps:{hours:[], late:[], caseload:[]}};
   if(!rows.length) return out;
+  const daySet = new Set(rows.map(r=>r.d));
+  const gapNote = (what, ws, we, miss) => out.skipped.push(`${what} ${ws} – ${we}: no notes on file for ${miss.length} weekday${miss.length!==1?'s':''} (${miss.slice(0,3).join(', ')}${miss.length>3?'…':''}) — upload a Notes export covering ${ws} to ${we}`);
   const nameCache = {};
   const staffOf = n => (n in nameCache) ? nameCache[n] : (nameCache[n] = resolveStaff(n));
 
@@ -4706,6 +4718,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
     if(pe >= todayISO) continue;
     const label = `Hours ${ps} – ${pe}`;
     if(minD > ps || maxD < pe){ if(i===1) out.skipped.push(`${label}: notes on file don't cover the whole period`); continue; }
+    { const miss = crMissingWeekdays(daySet, ps, pe); if(miss.length){ gapNote('Billable hours', ps, pe, miss); out.gaps.hours.push(pe); continue; } }
     const inP = rows.filter(r=>r.d>=ps && r.d<=pe);
     const prod = inP.filter(r=>crIsProductive(r.code));
     const noMin = prod.filter(r=>typeof r.m!=='number');
@@ -4735,6 +4748,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       const we = crAddDays(lastFri, -7*i), ws = crAddDays(we, -6);
       const label = `Late notes ${ws} – ${we}`;
       if(minD > ws || maxD < we){ if(i===0) out.skipped.push(`${label}: notes on file don't cover the whole week`); continue; }
+      { const miss = crMissingWeekdays(daySet, ws, we); if(miss.length){ gapNote('Late notes', ws, we, miss); out.gaps.late.push(we); continue; } }
       const ps = rows.filter(r=>r.d>=ws && r.d<=we && /^H0038( GT| HM)?$/i.test(r.code));
       const noL = ps.filter(r=>typeof r.l!=='number');
       if(noL.length > Math.max(2, ps.length*0.02)){ lateOld.push(ws); continue; }
@@ -4763,6 +4777,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       const we = crAddDays(lastSun, -7*i), ws = crAddDays(we, -6);
       const label = `Engagement ${ws} – ${we}`;
       if(minD > ws || maxD < we){ if(i===0) out.skipped.push(`${label}: notes on file don't cover the whole week`); continue; }
+      { const miss = crMissingWeekdays(daySet, ws, we); if(miss.length){ gapNote('Engagement', ws, we, miss); out.gaps.caseload.push(we); continue; } }
       // caseload snapshot: the first one taken on/after the week ended (within 14 days), else the last one before it (within 7)
       let snapKey = snapDates.find(s=>s>=we && s<=crAddDays(we,14)) || snapDates.slice().reverse().find(s=>s<we && s>=crAddDays(we,-7));
       if(!snapKey){ if(i===0) out.skipped.push(`${label}: no Renewals upload within two weeks of this week`); continue; }
@@ -4837,6 +4852,18 @@ async function recomputeCommunityFromRaw(opts){
     Object.values(S.pd||{}).forEach(per=>Object.entries(per||{}).forEach(([id,rec])=>{ if(rec && typeof rec.hours==='number' && rec.hours>0) hoursStaff.add(Number(id)); }));
     const res = await crCompute({pool:S.linkageNotesRaw, snapshots, resolveStaff, hash:retHash, todayISO:new Date().toISOString().slice(0,10), hoursStaff});
     const hKeys = Object.keys(res.hours), cKeys = Object.keys(res.caseload), lKeys = Object.keys(res.late||{});
+    // Clear numbers an earlier run computed from incomplete notes (a gap between uploads), so the
+    // hubs show "—" instead of a half-period that looks like a big drop.
+    let cleared = 0;
+    const clearFields = (k, fields, flag) => {
+      if(k < CR_RAW_SINCE || !S.pd || !S.pd[k]) return;
+      Object.entries(S.pd[k]).forEach(([id,rec])=>{ if(!rec || typeof rec!=='object') return; fields.forEach(f=>{ if(f in rec){ delete rec[f]; cleared++; } }); });
+      if(flag) delete S.pd[k][flag];
+    };
+    (res.gaps||{hours:[]}).hours.forEach(k=>clearFields(k, ['hours']));
+    (res.gaps||{late:[]}).late.forEach(k=>clearFields(k, ['lateNotes'], '_lnImported'));
+    (res.gaps||{caseload:[]}).caseload.forEach(k=>clearFields(k, ['caseload','outreach','engagement']));
+    if(cleared && !(hKeys.length || cKeys.length || lKeys.length)) await sv('p', S.pd);
     if(hKeys.length || cKeys.length || lKeys.length){
       S.pd = S.pd || {};
       hKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.hours[k]).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hours:h}; }); });
