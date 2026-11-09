@@ -833,6 +833,7 @@ async function syncFromSupabase(){
     // above. This is what makes weekly delta uploads safe: it's the accumulated memory a new
     // upload gets merged into, rather than each upload starting from a blank slate.
     const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;cacheLocal('linkageNotesRaw',S.linkageNotesRaw);}
+    const clSnaps=parse('caseload_snapshots');if(clSnaps&&clSnaps.snapshots){S.caseloadSnapshots=clSnaps.snapshots;}
   }
   const remoteTasks=await db.get('tasks');
   if(remoteTasks){
@@ -2051,16 +2052,16 @@ function parseLinkageUcodeNotes(rows){
 // yet — shown honestly as "not tracked here yet" rather than a guessed date. See the Data
 // Ingestion Architecture doc's repo-by-repo table for where each of these came from.
 const DATA_CATALOG = [
-  {registryKey:'roster_hours', label:'Roster — Billable Hours', supaKey:'pd (hours field)', uploadedVia:'Data & Staff Hub', consumers:'Every manager hub, BD Dashboard (Progress to Goal)', cadenceDays:14},
-  {registryKey:'roster_caseload', label:'Roster — Caseload / Engagement', supaKey:'pd (caseload field)', uploadedVia:'Data & Staff Hub', consumers:'Every manager hub, BD Dashboard (county caseload)', cadenceDays:7},
-  {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7},
+  {registryKey:'roster_hours', label:'Roster — Billable Hours', supaKey:'pd (hours field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Every manager hub, BD Dashboard (Progress to Goal)', cadenceDays:14, note:'No separate upload — computed automatically from the Pimsy Notes export for each completed Sat–Fri biweekly period.'},
+  {registryKey:'roster_caseload', label:'Roster — Caseload / Engagement', supaKey:'pd (caseload field)', uploadedVia:'Data & Staff Hub — computed from Pimsy Notes + Renewals (11/9/26)', consumers:'Every manager hub, BD Dashboard (county caseload)', cadenceDays:7, note:'No separate upload — caseload comes from the Renewals export (saved as caseload_snapshots, client numbers hashed); outreach/engagement from the Pimsy Notes export, each completed Mon–Sun week.'},
+  {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7, note:'No separate upload — H0038/GT/HM notes started more than 48 hours late (Created Date minus Start Note By Date), by session date, each completed Sat–Fri week.'},
   {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
   {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
   {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes + Client Sets)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26; client sets added 9/16/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup; Active Caseload/Total Admitted for Community + CCJ, live as of 9/16/26)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed on the Outcomes Dashboard side against live sli_assessments, joined to the client set this row provides.'},
   {registryKey:'client_roster_demo', label:'Client Roster / Demographics ("Clients by Demographic" export)', supaKey:'program_ledger (clientRosterCurrent)', uploadedVia:'Data & Staff Hub', consumers:'Outcomes Dashboard (widens the client population behind Screener Rate/PHQ-9/GAD-7/Risk/ASAM Improved + Contracted Outcomes status, unioned with Pimsy Notes’ own client sets)', cadenceDays:7, note:'Added 10/1/26, closing the gap the program_hub_ledger row above used to flag ("no live Demographics equivalent exists"). All-time, one-row-per-client file — Active flag + Default Division/Referral Source decide program membership independent of whether a service note was logged that specific week, unlike clientSetsCurrent.'},
   {registryKey:'supervision_tracking', label:'Supervision Tracking Workbook', supaKey:'sup_import', uploadedVia:'Data & Staff Hub', consumers:'Data & Staff Hub (credential compliance)', cadenceDays:30},
   {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
-  {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking', cadenceDays:14},
+  {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals, caseload_snapshots', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking; caseload for engagement % (11/9/26)', cadenceDays:7},
   {registryKey:'linkage_legacy_workbook', label:'Legacy Linkage Dashboard Workbook', supaKey:'linkage_data', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub (superseded by Pimsy Notes upload)', cadenceDays:null},
   {registryKey:'director_pl', label:'QuickBooks P&L by Class', supaKey:'director_financial, director_financial_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub, Executive Dashboard', cadenceDays:30, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_financial_history, which Director Hub already reads live on every load and promotes into its own "current" snapshot automatically, no Director Hub changes needed. Director Hub’s own upload button is left in place as a fallback during the transition, not yet removed.'},
   {registryKey:'director_klip_pimsy', label:'Klip Billing Export', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub', cadenceDays:7, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_pimsy_history and (when newer) director_pimsy, which Director Hub already reads live on every load. Director Hub’s own upload button left in place as a fallback during the transition, not yet removed. Manager attribution still uses the original hardcoded Deb/Muneera fallback rather than this hub’s own live staff roster — Data Hub’s manager keys (Debra, no Muneera) don’t match, so wiring that up is a follow-up, not done here.'},
@@ -2071,6 +2072,77 @@ const DATA_CATALOG = [
   {registryKey:'optum_sla', label:'Optum SLA & Disenrollment (Referral Export)', supaKey:'linkage_optum_actuals', uploadedVia:'Data & Staff Hub (moved 9/24/26)', consumers:'BH Linkage Hub (Optum SLA tab), Director Hub (ROI/Cost Trends)', cadenceDays:30, note:"Moved here 9/24/26 per Brandon's centralization direction — was previously only in Linkage Hub. Reads the Optum referral-tracker export's ADT Notification Received Date / Follow-Up Within 24 Business Hours / Disenrollment Date columns, aggregates by month, and merges into the same linkage_optum_actuals key Linkage Hub already reads live. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance remain manual entry in Linkage Hub — no source column for those in this export."},
   {registryKey:'sli_assessments', label:'SLI Screeners (ongoing)', supaKey:'sli_assessments (real table, not appdata)', uploadedVia:'Data & Staff Hub (added 9/30/26)', consumers:'Every live screener metric ecosystem-wide — Community/CCJ tiles, Outcomes Summary avg-PHQ-9, CCJ contract Outcome 4, live_screener_summary()', cadenceDays:14, note:"New 9/30/26 — the one-time historical backfill into sli_assessments closed 9/21/26 with nothing feeding it since; this is the real ongoing bridge. Re-derives every score through sliComputeScores() from the same granular Pimsy Screeners export used for the backfill, replays the live tool's own is_current/supersede + assessment_type sequencing logic, and skips sessions already on file — safe to re-upload the same full all-time export every time. See ecosystem-next-steps-tracker.md's 9/30/26 sections for the mapping validation this is built on."},
 ];
+// ══════════════════════════════════════════════════════════════
+// UPLOAD CHECKLIST (added 11/9/26, per Brandon) — top of Enter Data. One row per file that
+// still has to be uploaded by hand: how often, when it was last uploaded and by whom, how far
+// the data goes, whether it's due, where to get it, and which hubs it feeds. Status comes from
+// the same import registry (recordImport/S.impreg) and catalogFreshness() as the Data Catalog
+// tab, so the two can't disagree. "Upload ↓" jumps to that file's upload box below.
+// ══════════════════════════════════════════════════════════════
+const UPLOAD_CHECKLIST = [
+  {key:'pimsy_notes', name:'Pimsy Notes export', cadence:7, box:'up-notes', from:'Pimsy → Notes export, org-wide (all divisions), covering everything since the last upload', feeds:'BH Linkage Hub · Courts & Jail Hub · Outcomes Dashboard · Clinical Goals · Linkage U-codes · Community billable hours, engagement & late notes'},
+  {key:'renewals_workbook', name:'Renewals', cadence:7, box:'up-ren', from:'Pimsy → Renewals Tracker report (all clients). Upload early in the week so caseload matches the week just ended', feeds:'Community/Hospital/Courts renewals · caseload for engagement % · graduation & fall-off (Director Hub)'},
+  {key:'director_klip_pimsy', name:'Klip billing export', cadence:7, box:'up-klip', from:'Klipfolio report export', feeds:'Director Hub (revenue by provider and manager)'},
+  {key:'client_roster_demo', name:'Client Roster / Demographics', cadence:7, box:'up-demo', from:'Pimsy → "Clients by Demographic" export', feeds:'Outcomes Dashboard (program client lists)'},
+  {key:'sli_assessments', name:'SLI Screeners', cadence:14, box:'up-sli', from:'Pimsy → Screeners export', feeds:'Flagged Notes Tracker · screener metrics across the hubs'},
+  {key:'supervision_tracking', name:'Supervision tracking', cadence:30, box:'up-sup', from:'Supervision Tracking workbook', feeds:'Data & Staff Hub (credential compliance) · Hospital, Courts, Director and Clinical Director Hubs'},
+  {key:'hospital_outcomes', name:'Hospital Outcomes', cadence:30, box:'up-hosp', from:'Hospital Outcomes Tracking export', feeds:'Hospital / ThriveED Hub'},
+  {key:'director_pl', name:'QuickBooks P&L by Class', cadence:30, box:'up-pl', from:'QuickBooks → P&L by Class (monthly)', feeds:'Director Hub · Executive Dashboard'},
+  {key:'optum_sla', name:'Optum referral export', cadence:30, box:'up-optum', from:'Optum referral tracker export', feeds:'BH Linkage Hub (Optum SLA) · Director Hub (ROI)'},
+  {key:'bd_referrals', name:'BD referral volume', cadence:null, box:'up-bd', from:'BD referral CSV, as needed', feeds:'BD Dashboard'},
+];
+const UPLOAD_AUTOMATIC = [
+  {name:'Billable hours', from:'Pimsy Notes', key:'roster_hours'},
+  {name:'Caseload, Outreach % & Engagement %', from:'Pimsy Notes + Renewals', key:'roster_caseload'},
+  {name:'Late Notes', from:'Pimsy Notes', key:'roster_late_notes'},
+  {name:'Clinical Goals', from:'Pimsy Notes', key:'director_clinweekly'},
+  {name:'Linkage U-codes', from:'Pimsy Notes', key:'director_linkage_ucodes'},
+  {name:'Courts & Jail billing', from:'Pimsy Notes', key:'courts_billing'},
+  {name:'Outcomes ledger (sessions, revenue, minutes)', from:'Pimsy Notes', key:'program_hub_ledger'},
+];
+function uploadChecklistHTML(){
+  const reg = S.impreg || {};
+  const colors = {good:['#ECFDF5','#047857'], warn:['#FFFBEB','#B45309'], bad:['#FEF2F2','#B91C1C'], neutral:['#F3F4F6','#4B5563']};
+  const fmtDay = iso => { if(!iso) return '—'; const d=new Date(iso); return isNaN(d)?'—':d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); };
+  const cadenceLbl = c => c==null ? 'As needed' : c===7 ? 'Weekly' : c===14 ? 'Every 2 weeks' : c===30 ? 'Monthly' : `Every ${c} days`;
+  const rank = {bad:0, warn:1, neutral:2, good:3};
+  const rows = UPLOAD_CHECKLIST.map(u=>{ const e=reg[u.key]; return {...u, e, f:catalogFreshness(e, u.cadence)}; })
+    .sort((a,b)=> (rank[a.f.cls]-rank[b.f.cls]) || ((a.cadence||999)-(b.cadence||999)));
+  const dueN = rows.filter(r=>r.f.cls==='bad'||r.f.cls==='warn').length;
+  const rowHTML = r => {
+    const [bg,fg] = colors[r.f.cls] || colors.neutral;
+    const by = r.e && r.e.uploaded_by ? ` · ${xe(r.e.uploaded_by)}` : '';
+    const thru = r.e && r.e.data_through ? `Data through ${xe(fmtDataThrough(r.e.data_through))}` : '';
+    return `<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:10px 12px;border-top:1px solid #eee7da">
+      <div style="min-width:0">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px">
+          <span style="font-weight:700;font-size:13px;color:#1a2861">${xe(r.name)}</span>
+          <span style="font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:${bg};color:${fg}">${xe(r.f.label)}</span>
+          <span style="font-size:11px;color:#8089a8">${cadenceLbl(r.cadence)}</span>
+        </div>
+        <div style="font-size:11.5px;color:#3e4a78;margin-top:3px">Last uploaded ${fmtDay(r.e&&r.e.uploaded_at)}${by}${thru?' · '+thru:''}</div>
+        <div style="font-size:11.5px;color:#3e4a78;margin-top:2px"><strong style="color:#5a6487">Get it from:</strong> ${xe(r.from)}</div>
+        <div style="font-size:11.5px;color:#3e4a78;margin-top:2px"><strong style="color:#5a6487">Feeds:</strong> ${xe(r.feeds)}</div>
+      </div>
+      <div style="align-self:center"><button class="btn-n" style="font-size:11px;white-space:nowrap" onclick="H.goUpload('${r.box}')">Upload ↓</button></div>
+    </div>`;
+  };
+  const auto = UPLOAD_AUTOMATIC.map(a=>{
+    const e=reg[a.key];
+    const t=e&&e.data_through?fmtDataThrough(e.data_through):(e&&e.uploaded_at?fmtDay(e.uploaded_at):'not yet');
+    return `<span style="display:inline-block;margin:2px 12px 2px 0">✓ <strong>${xe(a.name)}</strong> <span style="color:#8089a8">from ${xe(a.from)} · through ${xe(t)}</span></span>`;
+  }).join('');
+  return `<div style="background:#fff;border:1px solid #e6dfd2;border-radius:10px;margin-bottom:14px;overflow:hidden">
+    <div style="padding:12px 12px 10px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:6px">
+      <div style="font-weight:800;font-size:14px;color:#1a2861">📋 Upload checklist</div>
+      <div style="font-size:12px;font-weight:700;color:${dueN?'#B91C1C':'#047857'}">${dueN?`${dueN} upload${dueN!==1?'s':''} due or overdue`:'Everything is up to date'}</div>
+    </div>
+    ${rows.map(rowHTML).join('')}
+    <div style="padding:10px 12px;border-top:1px solid #eee7da;background:#F6FBF7;font-size:11.5px;color:#3e4a78;line-height:1.6">
+      <div style="font-weight:700;color:#1a2861;margin-bottom:2px">Automatic — no upload needed</div>${auto}
+    </div>
+  </div>`;
+}
 function catalogFreshness(entry, cadenceDays){
   if(!entry || !entry.uploaded_at) return {label:'Never uploaded', cls:'bad'};
   const days = Math.floor((Date.now() - new Date(entry.uploaded_at).getTime())/86400000);
@@ -2858,8 +2930,8 @@ function modH(){
     </div>`;
     body=`<div style="font-weight:800;font-size:15px;color:#1a2861;margin-bottom:4px">↑ Enter Period Data</div>
     <div style="font-size:12px;color:#3e4a78;margin-bottom:10px">Upload files to populate staff metrics. Data is shared across all directors and managers via Supabase.</div>
-    ${freshnessBar}
-    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    ${uploadChecklistHTML()}
+    <div id="up-notes" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📋 Pimsy Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">One upload, fills Linkage + Courts/Jail</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the raw Pimsy Notes export (.xlsx) here — one file, one upload. U-code pipeline/revenue/G9009/outreach for Linkage and Clients/Billable Encounters for Courts/Jail are both read straight from it, most-recent-month only. <strong>Clinical Goals and Linkage U-code outcomes are also computed automatically from this same file</strong> — no separate upload, no extra confirm step; each posts its own toast when it's done. You can also drop the <strong>old Linkage Dashboard workbook</strong> here to one-time backfill real historical months (Sept 2025 onward) that the new pipeline has no other way to reconstruct.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileNotes(this)" style="font-size:12px;font-family:inherit">
@@ -2912,7 +2984,7 @@ function modH(){
       </div>`;
       })()):''}
     </div>
-    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-demo" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🧾 Client Roster / Demographics <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">All-time export · fixes Notes-week gaps in live screener metrics</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop Pimsy's "Clients by Demographic" export (.xlsx) here. It's a full all-time, one-row-per-client roster — Outcomes Dashboard uses its Active flag plus Default Division/Referral Source to know which program a client belongs to <strong>without needing a service note logged that same week</strong>, using the same mapping rules as Pimsy Notes above. This never replaces Active Caseload/Sessions/Revenue (those stay Notes-only — real billing activity) — it only widens the client list used for Screener Rate, PHQ-9/GAD-7/Risk/ASAM Improved, and the Contracted Outcomes statuses tied to them.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileDemo(this)" style="font-size:12px;font-family:inherit">
@@ -2930,7 +3002,7 @@ function modH(){
       </div>`;
       })()):''}
     </div>
-    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-klip" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🎯 Klip Billing Export <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly · moved from Director Hub</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Pimsy Klipfolio billing export (.xlsx) — a genuinely separate file from the Pimsy Notes export above (different columns entirely), not a cut of it. Reads Client/Service Date/Service Code/Provider/Total Charge/Total Paid, bucketed by month, and saves straight into the shared Klip/Pimsy history Director Hub reads on every load — <strong>you can keep uploading here from now on; Director Hub's own "↑ Upload Pimsy / Notes Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileKlip(this)" style="font-size:12px;font-family:inherit">
@@ -2972,44 +3044,31 @@ function modH(){
       </div>
       <div id="adcStatus" style="font-size:12px;margin-top:8px"></div>
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
-      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📊 Productivity (Hours) &amp; Progress to Goal <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Biweekly</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the real Pimsy productivity export (.xlsx) — if your workbook has one tab per period (e.g. "06.06 - 06.19"), the period is read directly from the tab name and both the current and previous period tabs are imported automatically. Plain CSV/TSV paste also still works (Pimsy ID, Hours).</div>
-      <input type="file" accept=".xlsx,.xls,.csv" onchange="H.hf(this)" style="font-size:12px;font-family:inherit">
-      ${prev&&M.tab==='hours'?previewBlock('Hours',prev,'commitPD','hours'):''}
+    <div id="up-auto" style="scroll-margin-top:12px;background:#ECFDF5;border:1px solid #A7F3D0;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📊 Billable Hours · 📈 Caseload &amp; Engagement · ⚠ Late Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Automatic — nothing to upload</span></div>
+      <div style="font-size:12px;color:#3e4a78;line-height:1.6">Computed from the <strong>Pimsy Notes</strong> and <strong>Renewals</strong> uploads (11/9/26). The Productivity workbook, Caseload Engagement report and Late Notes workbook are no longer used. Hours: each completed Sat–Fri two-week period. Caseload, Outreach % and Engagement %: each completed Mon–Sun week. Late notes: H0038 notes started more than 48 hours late, each completed Sat–Fri week. Late-released notes still count toward hours and engagement. Hours through <strong>${fmtDataThrough(periodForField('hours'))}</strong> · Engagement through <strong>${fmtDataThrough(periodForField('caseload'))}</strong> · Late notes through <strong>${fmtDataThrough(periodForField('lateNotes'))}</strong>.</div>
+      <div style="margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="H.recomputeCR()">↻ Recompute now</button></div>
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
-      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📈 Caseload Engagement <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Weekly Caseload Engagement Report (.xlsx) — reads the "Data Review" pivot tab directly (Count of ID / Outreach Rate % / Engagement Rate %). Falls back to aggregating the raw per-client rows if no pivot tab is found. Populates Caseload, Engagement %, and Outreach % together.</div>
-      <input type="file" accept=".xlsx,.xls,.csv" onchange="H.slotFile('engagement',this)" style="font-size:12px;font-family:inherit">
-      ${prev&&M.tab==='caseload'?previewBlock('Caseload Engagement',prev,'commitPD','caseload'):''}
-    </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
-      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">⚠ Late Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Late Notes 2026 (.xlsx)</div>
-      <input type="file" accept=".xlsx,.xls,.csv" onchange="H.slotFile('lateNotes',this)" style="font-size:12px;font-family:inherit">
-      ${prev&&M.tab==='lateNotes'?previewBlock('Late Notes',prev,'commitPD','lateNotes'):''}
-    </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-sup" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🗓 Supervision <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the real Supervision Tracking workbook (.xlsx) — reads the PRS Tracking, QBHS Tracking, SWT Supervision, and CDCA Tracking tabs directly. Plain paste/upload (Staff Name, Credential, Month, Completed Y/N) still works too.</div>
       <input type="file" accept=".xlsx,.xls,.csv,.txt" onchange="H.slotFileSup(this)" style="font-size:12px;font-family:inherit">
       ${prevSup?previewBlock('Supervision',prevSup,'commitSup'):''}
       ${dhscPreview('sup',true)}
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-triplog" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🚗 TripLog Mileage <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">At payroll cutoff · Manager Scorecard</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">TripLog “Mileage and Expenses” multi-user report (.csv, or the .zip TripLog emails). Feeds the mileage-review measure on Sarah’s Manager Scorecard.</div>
       <input type="file" accept=".csv,.zip" onchange="dhscFile('tl',this)" style="font-size:12px;font-family:inherit">
       ${dhscPreview('tl')}
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-jotform" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📝 JotForm Mileage <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">At payroll cutoff · Manager Scorecard</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Mileage Form Tracker workbook (.xlsx) — reads the Form Responses tab (Manager Approval box). Feeds the mileage-review measure on Sarah’s Manager Scorecard.</div>
       <input type="file" accept=".xlsx" onchange="dhscFile('jf',this)" style="font-size:12px;font-family:inherit">
       ${dhscPreview('jf')}
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-hosp" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🏥 Hospital Outcomes Tracking <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Biweekly</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the real Hospital Outcomes Tracking workbook (.xlsx) — automatically finds and combines the tabs with real encounter data (Linkage Tracking, BACKLOG), skips survey tabs. Scoped to Angelica's Hospital team.</div>
       <input type="file" accept=".xlsx,.xls,.csv" onchange="H.slotFileHosp(this)" style="font-size:12px;font-family:inherit">
@@ -3024,7 +3083,7 @@ function modH(){
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevHosp=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitHosp()">Confirm Import</button></div>
       </div>`):''}
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-pl" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">💰 QuickBooks P&amp;L by Class <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Director Hub</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop QuickBooks' "Profit and Loss by Class" export (.xlsx) — one month per file, or a multi-month export with per-month columns. Reads the same 7 division columns (Community, Hospitals, Linkage, Clinical, Justice Involved, Call Centers, Other) and Administrative overhead Director Hub has always read from this file. Saves straight to the shared financial history Director Hub reads on every load — <strong>you can keep uploading here from now on; Director Hub's own "↑ Refresh P&L Data" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFilePL(this)" style="font-size:12px;font-family:inherit">
@@ -3049,7 +3108,7 @@ function modH(){
       </div>`;
       })()):''}
     </div>
-    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-optum" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔗 Optum SLA &amp; Disenrollment <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Linkage Hub</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the Optum referral-tracker export (.xlsx; the de-identified version with a Member ID column works) — fills referrals, cumulative referrals, engaged members, and outreach counts by county, plus ADT discharge follow-up and disenrollment, aggregated by month, and merges straight into the shared Optum SLA data Linkage Hub already reads live. <strong>You can keep uploading here from now on; Linkage Hub's own "↑ Upload Referral Export" button still works too</strong> as a fallback during the transition, so nothing breaks if this one gets skipped by mistake. Time-to-assignment, time-to-first-contact, and 4-async/1-sync compliance stay manual entry in Linkage Hub — this export has no column for those.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileOptum(this)" style="font-size:12px;font-family:inherit">
@@ -3073,7 +3132,7 @@ function modH(){
       </div>`;
       })())):''}
     </div>
-    <div style="background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-bd" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📣 BD Referral Volume <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Ad hoc · moved from BD Dashboard</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop a referral-volume CSV export (Org, Region, then the 8 category counts, optional Notes column, optional header row) — merges by organization name, adding to any existing counts rather than replacing them. BD Dashboard's own Referral Volume tab is currently hidden pending UX work, so this is the one place this data lands for now; it'll be there waiting whenever that tab comes back.</div>
       <input type="file" accept=".csv" onchange="H.slotFileBdRef(this)" style="font-size:12px;font-family:inherit">
@@ -3086,7 +3145,7 @@ function modH(){
       </div>`;
       })()):''}
     </div>
-    <div style="background:#eef2fb;border:1px solid #c3d0ef;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-sli" style="scroll-margin-top:12px;background:#eef2fb;border:1px solid #c3d0ef;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🧠 SLI Screeners <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Ongoing · feeds sli_assessments</span></div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop the same Pimsy Screeners export used for the historical backfill (.xlsx, one row per client/session/question — "Thrive Screener" / "Thrive Screener 2.0" audits). Re-derives every score through the real, shared scoring engine and writes new sessions into <code>sli_assessments</code> — the same table every live screener metric ecosystem-wide reads from. Safe to re-upload the full all-time export every time: sessions already on file (matched by client + exact session date) are automatically skipped, never duplicated. Other audit types in the file (Client Automated Measures, BARC-10, EUROHIS-QOL, etc.) are not SLI 2.0 and are left out, same as the historical backfill. <strong>Requires edit mode unlocked</strong> (top of Roster tab) before you can confirm an import — <code>sli_assessments</code> only accepts writes from a real logged-in staff session, not the page's public key.</div>
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFileSliScreeners(this)" style="font-size:12px;font-family:inherit">
@@ -3110,7 +3169,7 @@ function modH(){
       </div>`;
       })())):''}
     </div>
-    <div style="background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+    <div id="up-ren" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔔 Renewals</div>
       <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Renewals export (.xlsx or tab-separated, with header row). Columns are matched by header name, not position — works whether or not the export includes First Name / Last Name columns. Looking for: Client Number, Peer Supporter, Renewal Name, Renewal Type, Expires On, Last Billable Note Date.</div>
       <input type="file" accept=".xlsx,.xls,.csv,.txt" onchange="H.slotFileRen(this)" style="font-size:12px;font-family:inherit">
@@ -4498,6 +4557,234 @@ async function saveRetention(byClient){
     if(!ok) throw new Error('save failed');
     return true;
   }catch(e){ console.warn('[saveRetention]',e); showSaveError('The graduation/fall-off data didn’t save — re-upload the Renewals file to retry.'); return false; }
+}
+
+// ══════════════════════════════════════════════════════════════
+// COMMUNITY METRICS FROM RAW DATA (added 11/9/26, per Brandon)
+// Replaces two report uploads: "2026 Community Productivity" (billable hours) and
+// "Caseload Engagement Weekly Report" (caseload / outreach % / engagement %). Both are now
+// computed here from data already uploaded:
+//   - Pimsy Notes export → the raw note pool (linkage_notes_raw, which now also keeps each
+//     note's Duration in Minutes as `m`)
+//   - Renewals export → caseload snapshots (which client belongs to which peer supporter),
+//     saved under appdata key `caseload_snapshots`, client numbers one-way hashed
+// Rules, confirmed against the old reports 11/9/26:
+//   - Billable hours = Duration in Minutes of every note EXCEPT Non-billable, ADMIN, OTR- Linkage,
+//     CTP ADMIN/Engagement/In-Reach, ITP, Phone. Biweekly Sat–Fri periods (e.g. 10/24–11/06),
+//     keyed by the period's end date like the old tabs. Matched the report exactly for most staff;
+//     differences were notes released after the report was run.
+//   - Caseload = clients with that Peer Supporter in the Renewals export. Outreach = client had
+//     ANY note that week (any provider). Engagement = client had an H0038 or H0036 note that
+//     week. Mon–Sun weeks keyed by the Sunday, like the old weekly tabs.
+//   - Late notes COUNT here (Brandon, 11/9/26: a late note shouldn't count against anyone's
+//     engagement or productivity — lateness shows up only in the Late Notes metric). So every
+//     note on file at the time of the upload counts, and a re-upload picks up late releases.
+// Only COMPLETED periods/weeks are computed. A period is skipped (and named in the toast) if
+// the note pool doesn't cover it, or if any billable note in it came from an upload made
+// before minutes were being stored — re-uploading a Notes export that covers it fixes that.
+// The pure core (crCompute) takes plain data in and returns plain data out so it can be
+// tested in Node against real exports.
+// ══════════════════════════════════════════════════════════════
+const CR_HOURS_ANCHOR = '2026-10-10';   // a real period start (Sat); periods run every 14 days from here
+const CR_LOOKBACK_PERIODS = 6;          // biweekly periods recomputed per run
+const CR_LOOKBACK_WEEKS = 8;            // weekly engagement periods recomputed per run
+const CR_SNAPSHOTS_KEPT = 8;
+const CR_NONBILLABLE = new Set(['non-billable','nonbillable','admin','otr- linkage','otr-linkage','ctp admin','ctp engagement','ctp in-reach','itp','phone','none','']);
+function crCode(raw){
+  const s = String(raw==null?'':raw).trim();
+  const m = s.match(/^\(([^)]*)\)/);           // Notes export: "(H0038) Community Peer Support (SUD)"
+  return (m ? m[1] : s).trim().replace(/\s+/g,' ');   // KLIP: "H0038"
+}
+function crIsProductive(code){ return !CR_NONBILLABLE.has(code.toLowerCase()); }
+function crIsEngagement(code){ return /^H003[68]\b/i.test(code); }
+function crAddDays(iso, n){ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
+
+// pool: {monthKey: {noteKey: {d, b, c, cl, m}}}; snapshots: {YYYY-MM-DD: {clientHash: staffId}}
+// resolveStaff(name) -> staff id or null; hash(clientId) -> Promise<string>; todayISO: 'YYYY-MM-DD'
+// hoursStaff: Set of staff ids allowed to receive hours (Community roster + anyone already tracked)
+async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursStaff}){
+  const rows = [];
+  let minD = null, maxD = null;
+  Object.values(pool||{}).forEach(month=>{
+    Object.values(month||{}).forEach(r=>{
+      if(!r || !r.d) return;
+      const d = String(r.d).slice(0,10);
+      rows.push({d, by:r.b||'', code:crCode(r.c), cl:r.cl==null?'':String(r.cl).trim(), m:r.m, l:r.l});
+      if(!minD || d<minD) minD=d;
+      if(!maxD || d>maxD) maxD=d;
+    });
+  });
+  const out = {hours:{}, caseload:{}, late:{}, skipped:[], computed:[]};
+  if(!rows.length) return out;
+  const nameCache = {};
+  const staffOf = n => (n in nameCache) ? nameCache[n] : (nameCache[n] = resolveStaff(n));
+
+  // ── Billable hours, biweekly ──
+  let start = CR_HOURS_ANCHOR;
+  while(crAddDays(start,14) <= todayISO) start = crAddDays(start,14);   // start of the current (incomplete) period
+  for(let i=1;i<=CR_LOOKBACK_PERIODS;i++){
+    const ps = crAddDays(start, -14*i), pe = crAddDays(ps, 13);
+    if(pe >= todayISO) continue;
+    const label = `Hours ${ps} – ${pe}`;
+    if(minD > ps || maxD < pe){ if(i===1) out.skipped.push(`${label}: notes on file don't cover the whole period`); continue; }
+    const inP = rows.filter(r=>r.d>=ps && r.d<=pe);
+    const prod = inP.filter(r=>crIsProductive(r.code));
+    const noMin = prod.filter(r=>typeof r.m!=='number');
+    // A handful of minute-less rows can be notes voided in Pimsy after an older upload (they're
+    // never re-exported, so never refreshed) — tolerate up to 2%, skip the period beyond that.
+    if(noMin.length > Math.max(2, prod.length*0.02)){ out.skipped.push(`${label}: ${noMin.length} billable notes came from an older upload without minutes — re-upload a Notes export covering this period`); continue; }
+    if(noMin.length) out.skipped.push(`${label}: computed, but ${noMin.length} older note${noMin.length!==1?'s':''} without minutes were left out`);
+    const mins = {};
+    inP.forEach(r=>{ const id=staffOf(r.by); if(id==null || (hoursStaff && !hoursStaff.has(id))) return; mins[id]=(mins[id]||0) + (crIsProductive(r.code) && typeof r.m==='number' ? r.m : 0); });
+    const per = {};
+    Object.entries(mins).forEach(([id,v])=>{ per[id] = Math.round(v/60*100)/100; });
+    if(Object.keys(per).length){ out.hours[pe] = per; out.computed.push(label); }
+  }
+
+  // ── Late notes, weekly (Sat–Fri, keyed by the Friday, like the old "10.24-10.30" tabs) ──
+  // Same rule as the Late Notes 2026 workbook: a peer support note (H0038, H0038 GT, H0038 HM)
+  // whose "Hours Late Starting Note" — Created Date minus Start Note By Date — is over 48.
+  // Counted by session date. A note that hasn't been started yet can't be judged until it is;
+  // it's counted on the upload after it's created, since each upload recomputes the last 8 weeks.
+  {
+    const td = new Date(todayISO+'T00:00:00Z');
+    const back = (td.getUTCDay() - 5 + 7) % 7 || 7;          // days back to the most recent completed Friday
+    const lastFri = crAddDays(todayISO, -back);
+    const lateOld = [];
+    for(let i=0;i<CR_LOOKBACK_WEEKS;i++){
+      const we = crAddDays(lastFri, -7*i), ws = crAddDays(we, -6);
+      const label = `Late notes ${ws} – ${we}`;
+      if(minD > ws || maxD < we){ if(i===0) out.skipped.push(`${label}: notes on file don't cover the whole week`); continue; }
+      const ps = rows.filter(r=>r.d>=ws && r.d<=we && /^H0038( GT| HM)?$/i.test(r.code));
+      const noL = ps.filter(r=>typeof r.l!=='number');
+      if(noL.length > Math.max(2, ps.length*0.02)){ lateOld.push(ws); continue; }
+      const cnt = {};
+      ps.forEach(r=>{ const id=staffOf(r.by); if(id==null) return; cnt[id]=(cnt[id]||0) + ((typeof r.l==='number' && r.l>48) ? 1 : 0); });
+      if(Object.keys(cnt).length){ out.late[we] = cnt; out.computed.push(label); }
+    }
+    if(lateOld.length) out.skipped.push(`Late notes: ${lateOld.length} earlier week${lateOld.length!==1?'s':''} (from ${lateOld.sort()[0]}) came from uploads made before start/created times were saved — re-upload a Notes export covering them to fill those in`);
+  }
+
+  // ── Caseload / outreach / engagement, weekly (Mon–Sun) ──
+  const snapDates = Object.keys(snapshots||{}).sort();
+  if(!snapDates.length){ out.skipped.push('Caseload engagement: no Renewals upload on file since this feature was added — upload the Renewals export'); }
+  else{
+    const td = new Date(todayISO+'T00:00:00Z');
+    const dow = td.getUTCDay();                              // 0=Sun
+    let lastSun = crAddDays(todayISO, -(dow===0?7:dow));     // most recent fully completed Sunday
+    // hash each client in the pool once
+    const clientHash = {}, firstSeen = {};
+    for(const r of rows){
+      if(!r.cl) continue;
+      if(!(r.cl in clientHash)) clientHash[r.cl] = await hash(r.cl);
+      const h = clientHash[r.cl]; if(!firstSeen[h] || r.d < firstSeen[h]) firstSeen[h] = r.d;
+    }
+    for(let i=0;i<CR_LOOKBACK_WEEKS;i++){
+      const we = crAddDays(lastSun, -7*i), ws = crAddDays(we, -6);
+      const label = `Engagement ${ws} – ${we}`;
+      if(minD > ws || maxD < we){ if(i===0) out.skipped.push(`${label}: notes on file don't cover the whole week`); continue; }
+      // caseload snapshot: the first one taken on/after the week ended (within 14 days), else the last one before it (within 7)
+      let snapKey = snapDates.find(s=>s>=we && s<=crAddDays(we,14)) || snapDates.slice().reverse().find(s=>s<we && s>=crAddDays(we,-7));
+      if(!snapKey){ if(i===0) out.skipped.push(`${label}: no Renewals upload within two weeks of this week`); continue; }
+      const any = new Set(), bill = new Set();
+      rows.forEach(r=>{
+        if(r.d<ws || r.d>we || !r.cl) return;
+        const h = clientHash[r.cl]; any.add(h);
+        if(crIsEngagement(r.code)) bill.add(h);
+      });
+      const per = {};
+      Object.entries(snapshots[snapKey]).forEach(([h,id])=>{
+        // The snapshot can be taken days after the week ended; a client whose very first note
+        // is after the week wasn't on the caseload yet (new admit), so leave them out of it.
+        if(firstSeen[h] && firstSeen[h] > we) return;
+        const p = per[id] = per[id] || {caseload:0, anyN:0, billN:0};
+        p.caseload++; if(any.has(h)) p.anyN++; if(bill.has(h)) p.billN++;
+      });
+      const wk = {};
+      Object.entries(per).forEach(([id,p])=>{
+        wk[id] = {caseload:p.caseload, outreach:Math.round(p.anyN/p.caseload*100), engagement:Math.round(p.billN/p.caseload*100)};
+      });
+      if(Object.keys(wk).length){ out.caseload[we] = wk; out.computed.push(`${label} (caseload as of ${snapKey})`); }
+    }
+  }
+  return out;
+}
+
+// Renewals upload → caseload snapshot for today. caseloadMap: {clientId: peerSupporterName}
+async function saveCaseloadSnapshot(caseloadMap){
+  try{
+    const entries = Object.entries(caseloadMap||{}); if(!entries.length) return false;
+    const snap = {}; let unmatched = 0;
+    const byName = {}; S.staff.forEach(s=>{ byName[normAliasName(s.fn+' '+s.ln)] = s; if(s.al) byName[normAliasName(s.al)] = s; });
+    for(const [cid, peer] of entries){
+      const st = resolveStaffByAlias(peer) || byName[normAliasName(peer)];
+      if(!st){ unmatched++; continue; }
+      snap[await retHash(cid)] = st.id;
+    }
+    const rows = await db.get('appdata','key=eq.caseload_snapshots');
+    let store = null; try{ store = rows&&rows[0]&&rows[0].value ? JSON.parse(rows[0].value) : null; }catch(e){}
+    store = store && store.snapshots ? store : {snapshots:{}};
+    const today = new Date().toISOString().slice(0,10);
+    store.snapshots[today] = snap;
+    const keep = Object.keys(store.snapshots).sort().slice(-CR_SNAPSHOTS_KEPT);
+    store.snapshots = Object.fromEntries(keep.map(k=>[k, store.snapshots[k]]));
+    store.updatedAt = new Date().toISOString();
+    const ok = await db.upsert('appdata',{key:'caseload_snapshots', value:JSON.stringify(store)},'key');
+    if(!ok) throw new Error('save failed');
+    S.caseloadSnapshots = store.snapshots;
+    return {ok:true, clients:Object.keys(snap).length, unmatched};
+  }catch(e){ console.warn('[saveCaseloadSnapshot]', e); showSaveError('Renewals saved, but the caseload snapshot for engagement % didn’t — re-upload the Renewals file to retry.'); return false; }
+}
+async function loadCaseloadSnapshots(){
+  try{
+    const rows = await db.get('appdata','key=eq.caseload_snapshots');
+    const v = rows&&rows[0]&&rows[0].value ? JSON.parse(rows[0].value) : null;
+    S.caseloadSnapshots = (v && v.snapshots) || {};
+  }catch(e){ S.caseloadSnapshots = S.caseloadSnapshots || {}; }
+  return S.caseloadSnapshots;
+}
+// Runs crCompute over what's on file and writes the results into pd. Called after a Pimsy Notes
+// import and after a Renewals import; also from the "Recompute" button on Enter Data.
+async function recomputeCommunityFromRaw(opts){
+  opts = opts || {};
+  try{
+    const snapshots = S.caseloadSnapshots && Object.keys(S.caseloadSnapshots).length ? S.caseloadSnapshots : await loadCaseloadSnapshots();
+    const byName = {}; S.staff.forEach(s=>{ byName[normAliasName(s.fn+' '+s.ln)] = s; if(s.al) byName[normAliasName(s.al)] = s; });
+    const resolveStaff = n => { const st = resolveStaffByAlias(n) || byName[normAliasName(n)]; return st ? st.id : null; };
+    // Hours go to Community staff plus anyone already tracked for hours, so other programs'
+    // pages don't suddenly sprout hours numbers they never showed before.
+    const hoursStaff = new Set(S.staff.filter(s=>String(s.program||'').toLowerCase()==='community').map(s=>s.id));
+    Object.values(S.pd||{}).forEach(per=>Object.entries(per||{}).forEach(([id,rec])=>{ if(rec && typeof rec.hours==='number' && rec.hours>0) hoursStaff.add(Number(id)); }));
+    const res = await crCompute({pool:S.linkageNotesRaw, snapshots, resolveStaff, hash:retHash, todayISO:new Date().toISOString().slice(0,10), hoursStaff});
+    const hKeys = Object.keys(res.hours), cKeys = Object.keys(res.caseload), lKeys = Object.keys(res.late||{});
+    if(hKeys.length || cKeys.length || lKeys.length){
+      S.pd = S.pd || {};
+      hKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.hours[k]).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hours:h}; }); });
+      cKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.caseload[k]).forEach(([id,v])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), ...v}; }); });
+      lKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.late[k]).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), lateNotes:n}; }); S.pd[k]._lnImported = true; });
+      const ok = await sv('p', S.pd);
+      if(!ok) return res;
+      if(hKeys.length) recordImport('roster_hours', {row_count:hKeys.reduce((a,k)=>a+Object.keys(res.hours[k]).length,0), period_label:hKeys.sort().pop(), data_through:hKeys.sort().pop(), source_filename:'computed from Pimsy Notes'});
+      if(lKeys.length) recordImport('roster_late_notes', {row_count:lKeys.reduce((a,k)=>a+Object.keys(res.late[k]).length,0), period_label:lKeys.sort().pop(), data_through:lKeys.sort().pop(), source_filename:'computed from Pimsy Notes'});
+      if(cKeys.length) recordImport('roster_caseload', {row_count:cKeys.reduce((a,k)=>a+Object.keys(res.caseload[k]).length,0), period_label:cKeys.sort().pop(), data_through:cKeys.sort().pop(), source_filename:'computed from Pimsy Notes + Renewals'});
+    }
+    const t=document.createElement('div');
+    const lines = [];
+    if(hKeys.length) lines.push(`✓ Billable hours updated for ${hKeys.length} period${hKeys.length!==1?'s':''} (latest ending ${hKeys.sort().pop()})`);
+    if(lKeys.length) lines.push(`✓ Late notes updated for ${lKeys.length} week${lKeys.length!==1?'s':''} (latest ending ${lKeys.sort().pop()})`);
+    if(cKeys.length) lines.push(`✓ Caseload & engagement updated for ${cKeys.length} week${cKeys.length!==1?'s':''} (latest ending ${cKeys.sort().pop()})`);
+    if(res.skipped.length) lines.push('Not updated: '+res.skipped.join(' · '));
+    if(!lines.length) lines.push('Nothing new to compute from the notes on file.');
+    t.textContent = lines.join('\n');
+    t.style.cssText='position:fixed;bottom:20px;right:20px;max-width:440px;white-space:pre-line;background:'+(res.skipped.length&&!hKeys.length&&!cKeys.length&&!lKeys.length?'#92400E':'#1B5E20')+';color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+    document.body.appendChild(t); setTimeout(()=>t.remove(), res.skipped.length?14000:7000);
+    if(!opts.noRender) render();
+    return res;
+  }catch(err){
+    console.error('[recomputeCommunityFromRaw]', err);
+    showSaveError('Couldn’t compute hours/engagement from the raw notes: '+(err&&err.message||err));
+    return null;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -6526,7 +6813,16 @@ function parseLinkageNotesExport(rows){
   const idx = name => hdr.findIndex(h=>h.toLowerCase()===name.toLowerCase());
   const colDate=idx('Service Date'), colBy=idx('Performed By'), colCode=idx('Billing Code'),
         colIns=idx('Insurance Co.'), colClient=idx('Client #'), colDiv=idx('Division'),
-        colNote=idx('Note #');
+        colNote=idx('Note #'), colMin=idx('Duration in Minutes'),
+        colStartBy=idx('Start Note By Date'), colCreated=idx('Created Date');
+  // Full date+time (not floored to the day) — for "hours late starting the note", added 11/9/26.
+  function toDT(v){
+    if(v==null||v==='') return null;
+    if(v instanceof Date) return isNaN(v)?null:v;
+    const n=+v;
+    if(!isNaN(n) && typeof v!=='string') return new Date(Date.UTC(1899,11,30) + n*86400000);
+    const d=new Date(v); return isNaN(d)?null:d;
+  }
   if(colDate<0||colBy<0||colCode<0||colIns<0){
     throw new Error('Not a recognized Notes export — need Service Date, Performed By, Billing Code, and Insurance Co. columns.');
   }
@@ -6557,6 +6853,8 @@ function parseLinkageNotesExport(rows){
       client: colClient>=0 ? row[colClient] : null,
       div: colDiv>=0 ? String(row[colDiv]||'') : '',
       note: colNote>=0 ? String(row[colNote]||'') : '',
+      min: (colMin>=0 && row[colMin]!=null && row[colMin]!=='' && !isNaN(+row[colMin])) ? +row[colMin] : undefined,
+      late: (()=>{ if(colStartBy<0||colCreated<0) return undefined; const a=toDT(row[colStartBy]), b=toDT(row[colCreated]); return (a&&b) ? Math.round((b-a)/360000)/10 : undefined; })(),
     });
   }
   // A Notes export commonly spans several months (confirmed against real files: one covered
@@ -6585,6 +6883,8 @@ function parseLinkageNotesExport(rows){
       inMonth.forEach((r,i)=>{
         const key = r.note || `${r.date.toISOString()}|${r.by}|${r.code}|${r.client}|${i}`;
         pool[key] = {d:r.date.toISOString(), b:r.by, c:r.code, i:r.ins, cl:r.client, v:r.div};
+        if(typeof r.min==='number') pool[key].m = r.min; // 11/9/26 — billable hours from raw notes (see crCompute)
+        if(typeof r.late==='number') pool[key].l = r.late; // 11/9/26 — hours late starting the note (Created − Start Note By), for Late Notes
       });
       rawRowsByMonth[snap.periodKey] = pool;
     }
@@ -8135,6 +8435,8 @@ async delSRow(enc){
   saveNote(id){const ta=document.getElementById('nNew');const text=ta?.value.trim();if(!text){alert('Please enter a note.');return;}const roleLbl=DIR[S.role]?.full||MGR[S.role]?.full||(S.role==='Brandon'?'Brandon Bailys (VP)':S.role);const entry={ts:new Date().toISOString(),by:roleLbl,text};S.noteLogs[id]=[entry,...(S.noteLogs[id]||[])];sv('nlogs',S.noteLogs);db.insert('notes',{staff_id:id,text,author:roleLbl});modH();const t=document.createElement('div');t.textContent='✓ Note saved';t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),1500);},
   delNote(id,ts){if(!confirm('Delete this note?'))return;S.noteLogs[id]=(S.noteLogs[id]||[]).filter(n=>n.ts!==ts);if(S.noteLogs[id].length===0)delete S.noteLogs[id];sv('nlogs',S.noteLogs);modH();},
   hf(inp){M.tab='hours';M.slotId='productivity';if(inp.files[0])this.rf(inp.files[0]);},
+  recomputeCR(){ recomputeCommunityFromRaw(); },
+  goUpload(id){ const el=document.getElementById(id); if(!el) return; el.scrollIntoView({behavior:'smooth',block:'start'}); el.style.transition='box-shadow .3s'; el.style.boxShadow='0 0 0 3px #3c50a0'; setTimeout(()=>{el.style.boxShadow='';},1800); },
   deletePeriod(key){
     if(!confirm(`Delete all data for period ${key}? This cannot be undone.`))return;
     const pd=JSON.parse(JSON.stringify(S.pd||{}));
@@ -8957,6 +9259,9 @@ async delSRow(enc){
         showSaveError('Linkage/Courts imported fine, but updating Linkage U-code outcomes failed to save. Try re-uploading this file.');
       });
     }
+    // 11/9/26 — Community billable hours + caseload/outreach/engagement, computed from the note
+    // pool just merged above (replaces the Productivity and Caseload Engagement report uploads).
+    if(lkMonthCount) recomputeCommunityFromRaw();
     M.prevNotes = null;
     render();
     const t=document.createElement('div');t.textContent=`✓ Imported Linkage (${lkMonthCount-lkSkipped} month${lkMonthCount-lkSkipped!==1?'s':''}${lkSkipped?`, ${lkSkipped} skipped — already on file`:''}) + ${courtsN} Courts/Jail record${courtsN!==1?'s':''} across ${courtsMonthCount} month${courtsMonthCount!==1?'s':''}${ctSkipped?` (${ctSkipped} skipped)`:''}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2400);
@@ -9344,6 +9649,7 @@ async delSRow(enc){
     const unmatchedNames=[];
     const seenUnmatched=new Set();
     const parsedRows=[];
+    const caseloadMap={}; // 11/9/26 — client → peer supporter, for engagement % (see saveCaseloadSnapshot)
     for(let i=start;i<lines.length;i++){
       const p=lines[i].split('\t');
       if(p.length<11)continue;
@@ -9362,6 +9668,7 @@ async delSRow(enc){
         if(gd){ const prevG=gradByClient[clientId]; if(!prevG || gd>prevG.date) gradByClient[clientId]={date:gd, ref:referralSource}; }
       }
       if(!clientId||!peerRaw){continue;}
+      caseloadMap[clientId]=peerRaw;
       const nameKey=peerRaw.toLowerCase().replace(/\s+/g,' ');
       const staff=resolveStaffByAlias(peerRaw)||staffByName[nameKey];
       if(staff && staff.mgr){
@@ -9385,7 +9692,7 @@ async delSRow(enc){
 
     const {toImport,toUpdate,dupes,reassignments}=ThriveRenewals.mergeRenewalImport(S.renewals,parsedRows,{dueDateFallbackDays:5,knownClientIds});
     const closed=toUpdate.filter(u=>u.reason==='discharged').length;
-    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[],retention,gradByClient};
+    M.prevRen={toImport,toUpdate,dupes,noMatch,noDate,closed,unmatchedNames,reassignments:reassignments||[],retention,gradByClient,caseloadMap};
     modH();
   },
   // FIX: previously only applied rev.toImport and returned early whenever there were zero new
@@ -9412,6 +9719,7 @@ async delSRow(enc){
         const btn0=document.getElementById('renBulkConfirmBtn'); if(btn0){btn0.disabled=true;btn0.textContent='Saving…';}
         const ok0=await saveRetention(rev.retention);
         if(rev.gradByClient) olMergeGraduationsIntoProgramLedger(rev.gradByClient).catch(e=>console.warn('[graduations]',e));
+        if(rev.caseloadMap) saveCaseloadSnapshot(rev.caseloadMap).then(r=>{ if(r&&r.ok) recomputeCommunityFromRaw(); });
         if(ok0){ const t=document.createElement('div');t.textContent=`✓ Graduation & fall-off data saved for ${Object.keys(rev.retention).length} clients (no renewal changes)`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),3500); }
       }
       M.prevRen=null;render();return;}
@@ -9449,6 +9757,7 @@ async delSRow(enc){
     recordImport('renewals_workbook', {row_count:nImport+nUpdate});
     if(rev.retention) await saveRetention(rev.retention);
     if(rev.gradByClient) olMergeGraduationsIntoProgramLedger(rev.gradByClient).catch(e=>console.warn('[graduations]',e));
+    if(rev.caseloadMap) saveCaseloadSnapshot(rev.caseloadMap).then(r=>{ if(r&&r.ok) recomputeCommunityFromRaw(); });
     M.prevRen=null;render();
     const t=document.createElement('div');t.textContent=`✓ Applied ${nImport+nUpdate} change${(nImport+nUpdate)!==1?'s':''} (${nImport} new, ${nUpdate} updated) — saved`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);
   },
