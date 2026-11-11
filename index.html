@@ -2093,7 +2093,7 @@ const UPLOAD_CHECKLIST = [
   {key:'sli_assessments', name:'SLI Screeners', cadence:14, box:'up-sli', from:'Pimsy → Screeners export', feeds:'Flagged Notes Tracker · screener metrics across the hubs'},
   {key:'supervision_tracking', name:'Supervision tracking', cadence:30, box:'up-sup', from:'Supervision Tracking workbook', feeds:'Data & Staff Hub (credential compliance) · Hospital, Courts, Director and Clinical Director Hubs'},
   {key:'hospital_outcomes', name:'Hospital Outcomes', cadence:30, box:'up-hosp', from:'Hospital Outcomes Tracking export', feeds:'Hospital / ThriveED Hub'},
-  {key:'director_pl', name:'QuickBooks P&L by Class', cadence:30, box:'up-pl', from:'QuickBooks → P&L by Class (monthly)', feeds:'Director Hub · Executive Dashboard'},
+  {key:'director_pl', name:'QuickBooks P&L by Class', cadence:30, box:'up-pl', from:'QuickBooks → P&L by Class (monthly)', feeds:'Director Hub · SLG Hub'},
   {key:'optum_sla', name:'Optum referral export', cadence:30, box:'up-optum', from:'Optum referral tracker export', feeds:'BH Linkage Hub (Optum SLA) · Director Hub (ROI)'},
   {key:'bd_referrals', name:'BD referral volume', cadence:null, box:'up-bd', from:'BD referral CSV, as needed', feeds:'BD Dashboard'},
 ];
@@ -2139,7 +2139,7 @@ const HUB_FEEDS = [
   {hub:'BH Linkage Hub', keys:['pimsy_notes','optum_sla']},
   {hub:'Director Hub', keys:['director_klip_pimsy','director_pl','director_clinweekly','director_linkage_ucodes','roster_hours','roster_caseload','renewals_workbook','optum_sla','supervision_tracking']},
   {hub:'Clinical Director Hub', keys:['director_klip_pimsy','supervision_tracking']},
-  {hub:'Executive Dashboard', keys:['director_pl','director_klip_pimsy']},
+  {hub:'SLG Hub', keys:['director_pl','director_klip_pimsy']},
   {hub:'Outcomes Dashboard', keys:['program_hub_ledger','client_roster_demo','sli_assessments']},
   {hub:'Flagged Notes Tracker', keys:['sli_assessments']},
   {hub:'BD Dashboard', keys:['bd_referrals','roster_hours','roster_caseload']},
