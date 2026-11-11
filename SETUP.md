@@ -79,7 +79,7 @@ Upload both UKG "Calculated Time Summary" reports for the same pay period togeth
 
 ### What each hub has (added 11/9/26)
 
-The checklist has two tabs. **What to upload** lists each file. **What each hub has** shows one card per hub (Community, Hospital, Courts & Jail, Linkage, Director, Clinical Director, Executive, Outcomes, Flagged Notes Tracker, BD Dashboard, Data & Staff Hub). Each card lists every dataset that hub shows, how far its data goes, and which upload it comes from, with a green, amber or red dot. The hub's badge (Up to date / Due soon / Old or missing data) is its worst dataset, and hubs with old data are listed first. A stale dataset has an **Upload ↓** button that jumps to the right upload box. To change which hub shows what, edit `HUB_FEEDS`, or `HUB_DATASETS` for the dataset names, in `index.html`.
+The checklist has two tabs. **What to upload** lists each file. **What each hub has** shows one card per hub (Community, Hospital, Courts & Jail, Linkage, Director, Clinical Director, SLG Hub, Outcomes, Flagged Notes Tracker, BD Dashboard, Data & Staff Hub). Each card lists every dataset that hub shows, how far its data goes, and which upload it comes from, with a green, amber or red dot. The hub's badge (Up to date / Due soon / Old or missing data) is its worst dataset, and hubs with old data are listed first. A stale dataset has an **Upload ↓** button that jumps to the right upload box. To change which hub shows what, edit `HUB_FEEDS`, or `HUB_DATASETS` for the dataset names, in `index.html`.
 
 ## Late Notes from raw data (added 11/9/26)
 
