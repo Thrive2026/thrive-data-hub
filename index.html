@@ -2060,6 +2060,7 @@ function parseLinkageUcodeNotes(rows){
 const DATA_CATALOG = [
   {registryKey:'roster_hours', label:'Roster — Billable Hours', supaKey:'pd (hours field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Every manager hub, BD Dashboard (Progress to Goal)', cadenceDays:14, note:'No separate upload — computed automatically from the Pimsy Notes export for each completed Sat–Fri biweekly period.'},
   {registryKey:'roster_caseload', label:'Roster — Caseload / Engagement', supaKey:'pd (caseload field)', uploadedVia:'Data & Staff Hub — computed from Pimsy Notes + Renewals (11/9/26)', consumers:'Every manager hub, BD Dashboard (county caseload)', cadenceDays:7, note:'No separate upload — caseload comes from the Renewals export (saved as caseload_snapshots, client numbers hashed); outreach/engagement from the Pimsy Notes export, each completed Mon–Sun week.'},
+  {registryKey:'ukg_time', label:'UKG Time (PTO / overtime / admin hours)', supaKey:'pd (hfc, pto, ot, adminHrs fields)', uploadedVia:'Data & Staff Hub (added 11/11/26)', consumers:'Community Hub (Productivity %, PTO-adjusted targets)', cadenceDays:14, note:'Both UKG Calculated Time Summary reports for a pay period, uploaded together. Hours for Calculation uses the old productivity workbook formula.'},
   {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7, note:'No separate upload — H0038/GT/HM notes started more than 48 hours late (Created Date minus Start Note By Date), by session date, each completed Sat–Fri week.'},
   {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
   {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
@@ -2079,6 +2080,84 @@ const DATA_CATALOG = [
   {registryKey:'sli_assessments', label:'SLI Screeners (ongoing)', supaKey:'sli_assessments (real table, not appdata)', uploadedVia:'Data & Staff Hub (added 9/30/26)', consumers:'Every live screener metric ecosystem-wide — Community/CCJ tiles, Outcomes Summary avg-PHQ-9, CCJ contract Outcome 4, live_screener_summary()', cadenceDays:14, note:"New 9/30/26 — the one-time historical backfill into sli_assessments closed 9/21/26 with nothing feeding it since; this is the real ongoing bridge. Re-derives every score through sliComputeScores() from the same granular Pimsy Screeners export used for the backfill, replays the live tool's own is_current/supersede + assessment_type sequencing logic, and skips sessions already on file — safe to re-upload the same full all-time export every time. See ecosystem-next-steps-tracker.md's 9/30/26 sections for the mapping validation this is built on."},
 ];
 // ══════════════════════════════════════════════════════════════
+// UKG TIME (added 11/11/26, per Brandon) — PTO, overtime and admin hours from the two UKG
+// "Calculated Time Summary" reports Emily runs each pay period:
+//   - "Community Productivity Report" (adult cost centers only)
+//   - "Total Hours for Vlookup - Community Productivity Report" (every non-exempt employee,
+//     every cost center — includes the ADMIN cost center and grant-program staff)
+// Either file works alone; upload both together for the full picture (see the merge in readUkgFiles). Produces, per staff member and pay period, the old workbook's "Hours for
+// Calculation" (formula copied from the 2025 tabs):
+//   Full-time:          80 + overtime − admin/meeting hours − PTO − floating holiday
+//   Part-time / split:  regular (non-admin) hours + overtime + holiday worked 1.0 + 1.5
+// Productivity % = billable hours (from Pimsy) ÷ Hours for Calculation. Stored in pd under the
+// pay period's end date (from the report's Counter Date) as hfc / pto / ot / adminHrs.
+// ══════════════════════════════════════════════════════════════
+function ukgParse(rows){
+  const num = v => { const n = parseFloat(String(v==null?'':v).replace(/,/g,'')); return isNaN(n) ? 0 : n; };
+  let start=null, end=null, title='';
+  for(const r of rows.slice(0,6)){
+    const s = (r||[]).map(c=>String(c==null?'':c)).join(' ');
+    const m = s.match(/Counter Date:\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+    if(m){ const p=n=>String(n).padStart(2,'0'); start=`${m[3]}-${p(m[1])}-${p(m[2])}`; end=`${m[6]}-${p(m[4])}-${p(m[5])}`; }
+    if(/Calculated Time Summary/i.test(s)) title = s;
+  }
+  let hi = rows.findIndex(r=>r && String(r[0]||'').trim().toLowerCase()==='employee id');
+  if(hi<0) throw new Error('This doesn\'t look like a UKG Calculated Time Summary — no "Employee Id" header row.');
+  if(!end) throw new Error('Couldn\'t find the "Counter Date" (pay period) at the top of the report.');
+  const hdr = rows[hi].map(h=>String(h||'').trim().toLowerCase());
+  const col = re => hdr.findIndex(h=>re.test(h));
+  const C = {id:0, type:col(/^employee type$/), cc:col(/cost centers full path/), flt:col(/floating holiday/), h1:col(/holiday worked 1\.0/), h15:col(/holiday worked 1\.5/), pto:col(/paid time off/), reg:col(/^regular hours$/), ot:col(/overtime/)};
+  if(C.type<0||C.pto<0||C.reg<0) throw new Error('Missing expected columns (Employee Type, Paid Time Off Hours, Regular Hours).');
+  const emp = {};
+  for(const r of rows.slice(hi+1)){
+    if(!r) continue;
+    const id = parseInt(r[C.id]); if(!id || isNaN(id)) continue;
+    const e = emp[id] = emp[id] || {type:'', name:'', pto:0, ot:0, flt:0, h1:0, h15:0, adminReg:0, otherReg:0, adultReg:0};
+    e.type = String(r[C.type]||e.type).trim();
+    e.name = `${String(r[1]||'').trim()} ${String(r[2]||'').trim()}`.trim();
+    const isAdmin = /\/admin$/i.test(String(r[C.cc]||'').trim());
+    e.pto += num(r[C.pto]); e.ot += C.ot>=0?num(r[C.ot]):0;
+    e.flt += C.flt>=0?num(r[C.flt]):0; e.h1 += C.h1>=0?num(r[C.h1]):0; e.h15 += C.h15>=0?num(r[C.h15]):0;
+    const cc = String(r[C.cc]||'');
+    if(isAdmin) e.adminReg += num(r[C.reg]); else { e.otherReg += num(r[C.reg]); if(/adult/i.test(cc)) e.adultReg += num(r[C.reg]); }
+  }
+  const kind = /vlookup/i.test(title) ? 'all' : 'adult';
+  return {start, end, kind, emp};
+}
+function ukgHoursForCalc(e){
+  const r2 = n => Math.round(n*100)/100;
+  const ft = /full-?time/i.test(e.type);
+  // Part-time/split: regular hours on the adult (Community) cost centers, as the old adult-only
+  // report gave — a split employee's other-program hours shouldn't count. Staff with no adult
+  // cost center (grant programs) use all their non-admin regular hours.
+  const reg = e.adultReg > 0 ? e.adultReg : e.otherReg;
+  const hfc = ft ? 80 + e.ot - e.adminReg - e.pto - e.flt : reg + e.ot + e.h1 + e.h15;
+  return {hfc:r2(Math.max(0,hfc)), pto:r2(e.pto), ot:r2(e.ot), adminHrs:r2(e.adminReg), ft};
+}
+async function readUkgFiles(files){
+  const parsed = [];
+  for(const f of files){
+    const buf = await f.arrayBuffer();
+    const rows = await parseXlsxFirstSheetRows(buf);
+    parsed.push({name:f.name, ...ukgParse(rows)});
+  }
+  const ends = [...new Set(parsed.map(p=>p.end))];
+  if(ends.length>1) throw new Error(`These files cover different pay periods (${ends.join(', ')}). Upload the two reports for the same pay period together.`);
+  // Merge: the Vlookup file covers every non-exempt employee across all cost centers (incl. ADMIN),
+  // so it wins for anyone in it; the adult-only report fills in anyone it leaves out (e.g. a
+  // full-time exempt staff member, whom the Vlookup report filters out).
+  const adult = parsed.find(p=>p.kind==='adult'), all = parsed.find(p=>p.kind==='all');
+  const src = {...(all||adult), emp:{...((adult&&adult.emp)||{}), ...((all&&all.emp)||{})}, kind: all&&adult ? 'both' : (all?'all':'adult')};
+  const byId = Object.fromEntries(S.staff.map(s=>[s.id,s]));
+  const matched=[], unmatched=[];
+  Object.entries(src.emp).forEach(([id,e])=>{
+    const s = byId[+id];
+    const v = ukgHoursForCalc(e);
+    if(s) matched.push({id:+id, name:s.fn+' '+s.ln, ...v}); else unmatched.push(`${e.name} (ID ${id})`);
+  });
+  return {start:src.start, end:src.end, kind:src.kind, files:parsed.map(p=>p.name), matched, unmatched};
+}
+// ══════════════════════════════════════════════════════════════
 // UPLOAD CHECKLIST (added 11/9/26, per Brandon) — top of Enter Data. One row per file that
 // still has to be uploaded by hand: how often, when it was last uploaded and by whom, how far
 // the data goes, whether it's due, where to get it, and which hubs it feeds. Status comes from
@@ -2088,6 +2167,7 @@ const DATA_CATALOG = [
 const UPLOAD_CHECKLIST = [
   {key:'pimsy_notes', name:'Pimsy Notes export', cadence:7, box:'up-notes', from:'Pimsy → Notes export, org-wide (all divisions), covering everything since the last upload', feeds:'BH Linkage Hub · Courts & Jail Hub · Outcomes Dashboard · Clinical Goals · Linkage U-codes · Community billable hours, engagement & late notes'},
   {key:'renewals_workbook', name:'Renewals', cadence:7, box:'up-ren', from:'Pimsy → Renewals Tracker report (all clients). Upload early in the week so caseload matches the week just ended', feeds:'Community/Hospital/Courts renewals · caseload for engagement % · graduation & fall-off (Director Hub)'},
+  {key:'ukg_time', name:'UKG time reports (PTO, overtime, admin)', cadence:14, box:'up-ukg', from:'UKG → Community Productivity Report + Total Hours for Vlookup, Counter Date = the pay period (Sat–Fri). Emily sends both every other Monday', feeds:'Community Hub (Productivity %, PTO-adjusted hours targets and Progress to Goal)'},
   {key:'director_klip_pimsy', name:'Klip billing export', cadence:7, box:'up-klip', from:'Klipfolio report export', feeds:'Director Hub (revenue by provider and manager)'},
   {key:'client_roster_demo', name:'Client Roster / Demographics', cadence:7, box:'up-demo', from:'Pimsy → "Clients by Demographic" export', feeds:'Outcomes Dashboard (program client lists)'},
   {key:'sli_assessments', name:'SLI Screeners', cadence:14, box:'up-sli', from:'Pimsy → Screeners export', feeds:'Flagged Notes Tracker · screener metrics across the hubs'},
@@ -2116,6 +2196,7 @@ const UPLOAD_AUTOMATIC = [
 const HUB_DATASETS = {
   pimsy_notes:          {name:'Linkage pipeline, revenue & outreach', src:'Pimsy Notes', cadence:7, box:'up-notes'},
   roster_hours:         {name:'Billable hours', src:'Pimsy Notes (automatic)', cadence:14, box:'up-notes'},
+  ukg_time:             {name:'PTO, overtime & Productivity %', src:'UKG time reports', cadence:14, box:'up-ukg'},
   roster_caseload:      {name:'Caseload, Outreach % & Engagement %', src:'Pimsy Notes + Renewals (automatic)', cadence:7, box:'up-ren'},
   roster_late_notes:    {name:'Late notes', src:'Pimsy Notes (automatic)', cadence:7, box:'up-notes'},
   courts_billing:       {name:'Courts & Jail clients / billable encounters', src:'Pimsy Notes (automatic)', cadence:7, box:'up-notes'},
@@ -2133,7 +2214,7 @@ const HUB_DATASETS = {
   bd_referrals:         {name:'Referral volume', src:'BD referral volume', cadence:null, box:'up-bd'},
 };
 const HUB_FEEDS = [
-  {hub:'Community Hub', keys:['roster_hours','roster_caseload','roster_late_notes','renewals_workbook']},
+  {hub:'Community Hub', keys:['roster_hours','ukg_time','roster_caseload','roster_late_notes','renewals_workbook']},
   {hub:'Hospital / ThriveED Hub', keys:['hospital_outcomes','roster_late_notes','renewals_workbook','supervision_tracking']},
   {hub:'Courts & Jail Hub', keys:['courts_billing','roster_late_notes','renewals_workbook','supervision_tracking']},
   {hub:'BH Linkage Hub', keys:['pimsy_notes','optum_sla']},
@@ -3132,6 +3213,18 @@ function modH(){
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">📊 Billable Hours · 📈 Caseload &amp; Engagement · ⚠ Late Notes <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Automatic — nothing to upload</span></div>
       <div style="font-size:12px;color:#3e4a78;line-height:1.6">Computed from the <strong>Pimsy Notes</strong> and <strong>Renewals</strong> uploads (11/9/26). The Productivity workbook, Caseload Engagement report and Late Notes workbook are no longer used. Hours: each completed Sat–Fri two-week period. Caseload, Outreach % and Engagement %: each completed Mon–Sun week. Late notes: H0038 notes started more than 48 hours late, each completed Sat–Fri week. Late-released notes still count toward hours and engagement. Hours through <strong>${fmtDataThrough(periodForField('hours'))}</strong> · Engagement through <strong>${fmtDataThrough(periodForField('caseload'))}</strong> · Late notes through <strong>${fmtDataThrough(periodForField('lateNotes'))}</strong>.</div>
       <div style="margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="H.recomputeCR()">↻ Recompute now</button></div>
+    </div>
+    <div id="up-ukg" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">⏱ UKG Time (PTO, overtime, admin) <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Every pay period</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Select <strong>both</strong> UKG reports for the same pay period at once: <em>Community Productivity Report</em> and <em>Total Hours for Vlookup - Community Productivity Report</em>, exported as .xlsx and unedited. The pay period is read from the report's Counter Date. Used for each person's Productivity % and to lower hours targets for PTO.</div>
+      <input type="file" multiple accept=".xlsx,.xls" onchange="H.slotFileUkg(this)" style="font-size:12px;font-family:inherit">
+      ${M.prevUkg?(M.prevUkg.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px;color:#991B1B">${xe(M.prevUkg.error)}</div>`:`<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px;font-size:12px;color:#3e4a78;line-height:1.7">
+        <div style="font-weight:700;color:#1a2861;margin-bottom:4px">Preview — UKG time, pay period ${xe(fmtDataThrough(M.prevUkg.start))} – ${xe(fmtDataThrough(M.prevUkg.end))}</div>
+        <div>📄 ${M.prevUkg.files.map(xe).join(' + ')}${M.prevUkg.kind==='both'?'':` <span style="color:#B45309">— only ${M.prevUkg.kind==='all'?'the Total Hours for Vlookup report':'the Community Productivity Report'}; add the other one too if you have it${M.prevUkg.kind==='adult'?' (it has admin hours and grant-program staff)':''}</span>`}</div>
+        <div>✅ <strong>${M.prevUkg.matched.length}</strong> staff matched by Employee Id · ${M.prevUkg.matched.filter(x=>x.pto>0).length} with PTO</div>
+        <div style="color:#8089a8">${M.prevUkg.unmatched.length} others in the report aren't on the staff roster (admin, billing, etc.) and are skipped.</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevUkg=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitUkg()">Confirm Import</button></div>
+      </div>`):''}
     </div>
     <div id="up-sup" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🗓 Supervision <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Weekly</span></div>
@@ -8567,6 +8660,22 @@ async delSRow(enc){
   hf(inp){M.tab='hours';M.slotId='productivity';if(inp.files[0])this.rf(inp.files[0]);},
   recomputeCR(){ recomputeCommunityFromRaw(); },
   ckView(v){ M.ckView=v; modH(); },
+  async slotFileUkg(inp){
+    const files=[...(inp.files||[])]; if(!files.length) return;
+    S._lastFile=files.map(f=>f.name).join(' + ');
+    try{ M.prevUkg = await readUkgFiles(files); }catch(err){ M.prevUkg = {error:'Could not read that file: '+err.message}; }
+    modH();
+  },
+  async commitUkg(){
+    const p=M.prevUkg; if(!p||p.error||!p.matched.length) return;
+    S.pd=S.pd||{}; S.pd[p.end]=S.pd[p.end]||{};
+    p.matched.forEach(m=>{ S.pd[p.end][m.id]={...(S.pd[p.end][m.id]||{}), hfc:m.hfc, pto:m.pto, ot:m.ot, adminHrs:m.adminHrs}; });
+    const ok=await sv('p',S.pd);
+    if(!ok) return;
+    recordImport('ukg_time',{row_count:p.matched.length, period_label:p.end, data_through:p.end});
+    M.prevUkg=null; render();
+    const t=document.createElement('div');t.textContent=`✓ UKG time saved for ${p.matched.length} staff, pay period ending ${fmtDataThrough(p.end)}`;t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600';document.body.appendChild(t);setTimeout(()=>t.remove(),5000);
+  },
   goUpload(id){ const el=document.getElementById(id); if(!el) return; el.scrollIntoView({behavior:'smooth',block:'start'}); el.style.transition='box-shadow .3s'; el.style.boxShadow='0 0 0 3px #3c50a0'; setTimeout(()=>{el.style.boxShadow='';},1800); },
   deletePeriod(key){
     if(!confirm(`Delete all data for period ${key}? This cannot be undone.`))return;
