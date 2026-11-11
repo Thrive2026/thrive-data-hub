@@ -1860,6 +1860,58 @@ const CLINICAL_CPST_RATE = 88.12; // per hour
 const CLINICAL_DISCHARGE_WEEKLY_GOAL = 10;
 const CLINICAL_OUTREACH_WEEKLY_GOAL = 15;
 const WEEKS_PER_MONTH = 4.345; // 365.25/12/7 — used to turn a weekly goal into a monthly one
+
+// ── PROVISIONAL CHARTS → Flagged Notes Tracker (11/11/26) ──
+// Rides along with the Pimsy Notes upload (no separate upload). Pimsy marks a provisional
+// assessment with Note Type "Provisional Note"; the full assessment follows ~30 days later as
+// Note Type "Assessment Note" billed 90791 / H0001. The Flagged Notes Tracker treats a chart
+// as provisional between those two dates, so generic treatment-plan goals aren't flagged.
+// Saves ONLY the digits of the client # (C-C-39161 -> 39161), the service date, and which of
+// the two events it was, into client_assessment_events (SQL: "Note Reviews and Provisional
+// Charts.sql"). Pimsy sometimes shifts a row's cells one column left when a field is blank,
+// so the note type is found by scanning left from the Note Type column, and the billing code
+// by searching the whole row (verified against a real 11/9/26 export: 368 provisional + 250
+// full assessments, matching an independent parse exactly).
+function provClientKey(clientNumber){
+  const m = String(clientNumber||'').match(/(\d+)(?!.*\d)/);
+  return m ? String(parseInt(m[1],10)) : null;
+}
+function extractAssessmentEvents(rows){
+  const hdr = (rows[0]||[]).map(h=>String(h==null?'':h).trim().toLowerCase());
+  const iDate=hdr.indexOf('service date'), iClient=hdr.indexOf('client #'), iType=hdr.indexOf('note type');
+  if(iDate<0||iClient<0||iType<0) throw new Error('Not a recognized Notes export — need Service Date, Client # and Note Type columns.');
+  function isoDate(v){
+    if(v instanceof Date) return isNaN(v)?null:v.toISOString().slice(0,10); // parser builds dates at UTC midnight
+    if(typeof v==='number' && isFinite(v)) return new Date(Date.UTC(1899,11,30)+Math.floor(v)*86400000).toISOString().slice(0,10);
+    const s=String(v==null?'':v).trim(); let m;
+    if((m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0');
+    if((m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/))) return (m[3].length===2?'20'+m[3]:m[3])+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');
+    return null;
+  }
+  const seen={}, events=[];
+  for(let r=1;r<rows.length;r++){
+    const row=rows[r]||[];
+    let type=null;
+    for(let j=iType;j>=Math.max(0,iType-3);j--){
+      const raw=row[j];
+      const v=String(raw==null?'':raw).trim();
+      if(!v || typeof raw==='boolean' || typeof raw==='number' || /^(true|false)$/i.test(v)) continue;
+      type=v; break;
+    }
+    let ev=null;
+    if(type==='Provisional Note') ev='provisional';
+    else if(type==='Assessment Note' && row.some(c=>typeof c==='string' && /\((?:90791|H0001)\b/.test(c))) ev='full';
+    if(!ev) continue;
+    const key=provClientKey(row[iClient]), date=isoDate(row[iDate]);
+    if(!key||!date) continue;
+    const id=key+'|'+ev+'|'+date;
+    if(seen[id]) continue;
+    seen[id]=true;
+    events.push({client_key:key, event_type:ev, event_date:date});
+  }
+  return events;
+}
+
 function parseClinicalNotesExport(rows){
   const hdr = rows[0].map(h=>String(h||'').trim());
   const idx = name => hdr.findIndex(h=>h.toLowerCase()===name.toLowerCase());
@@ -2080,7 +2132,7 @@ const DATA_CATALOG = [
 // tab, so the two can't disagree. "Upload ↓" jumps to that file's upload box below.
 // ══════════════════════════════════════════════════════════════
 const UPLOAD_CHECKLIST = [
-  {key:'pimsy_notes', name:'Pimsy Notes export', cadence:7, box:'up-notes', from:'Pimsy → Notes export, org-wide (all divisions), covering everything since the last upload', feeds:'BH Linkage Hub · Courts & Jail Hub · Outcomes Dashboard · Clinical Goals · Linkage U-codes · Community billable hours, engagement & late notes'},
+  {key:'pimsy_notes', name:'Pimsy Notes export', cadence:7, box:'up-notes', from:'Pimsy → Notes export, org-wide (all divisions), covering everything since the last upload', feeds:'BH Linkage Hub · Courts & Jail Hub · Outcomes Dashboard · Clinical Goals · Linkage U-codes · Community billable hours, engagement & late notes · Flagged Notes Tracker (provisional charts)'},
   {key:'renewals_workbook', name:'Renewals', cadence:7, box:'up-ren', from:'Pimsy → Renewals Tracker report (all clients). Upload early in the week so caseload matches the week just ended', feeds:'Community/Hospital/Courts renewals · caseload for engagement % · graduation & fall-off (Director Hub)'},
   {key:'director_klip_pimsy', name:'Klip billing export', cadence:7, box:'up-klip', from:'Klipfolio report export', feeds:'Director Hub (revenue by provider and manager)'},
   {key:'client_roster_demo', name:'Client Roster / Demographics', cadence:7, box:'up-demo', from:'Pimsy → "Clients by Demographic" export', feeds:'Outcomes Dashboard (program client lists)'},
@@ -9391,6 +9443,11 @@ async delSRow(enc){
         console.warn('[commitLinkageUcodes]', err);
         showSaveError('Linkage/Courts imported fine, but updating Linkage U-code outcomes failed to save. Try re-uploading this file.');
       });
+      // 11/11/26 — provisional / full assessment dates for the Flagged Notes Tracker.
+      H._provisionalCommitChain = H._provisionalCommitChain.then(()=>H._commitProvisionalFromNotes(p.rawRows)).catch(err=>{
+        console.warn('[commitProvisional]', err);
+        showSaveError('Linkage/Courts imported fine, but provisional charts for the Flagged Notes Tracker were not updated: ' + (err && err.message || err));
+      });
     }
     // 11/9/26 — Community billable hours + caseload/outreach/engagement, computed from the note
     // pool just merged above (replaces the Productivity and Caseload Engagement report uploads).
@@ -9447,6 +9504,31 @@ async delSRow(enc){
   },
   // Same serialized-write pattern as _plCommitChain/_klipCommitChain — see the comment on
   // _plCommitChain above for the exact race this prevents.
+  // 11/11/26 — see extractAssessmentEvents(). Writes through dsSb (the signed-in staff session),
+  // not db.*, because client_assessment_events only accepts inserts from org-wide reviewers.
+  // Duplicates are skipped, so overlapping uploads are safe.
+  _provisionalCommitChain: Promise.resolve(),
+  async _commitProvisionalFromNotes(rawRows){
+    const events = extractAssessmentEvents(rawRows);
+    if(!events.length) return;
+    const {data:sess} = await dsSb.auth.getSession();
+    if(!sess || !sess.session) throw new Error('not signed in — sign in to the Data Hub, then re-upload this file.');
+    for(let i=0;i<events.length;i+=500){
+      const {error} = await dsSb.from('client_assessment_events')
+        .upsert(events.slice(i,i+500), {onConflict:'client_key,event_type,event_date', ignoreDuplicates:true});
+      if(error){
+        if(/jwt/i.test(error.message||'')) throw new Error('your sign-in expired — sign out and back in, then re-upload this file.');
+        if(/row-level security/i.test(error.message||'')) throw new Error('only org-wide reviewers can update provisional charts.');
+        if(/client_assessment_events/.test(error.message||'') && /(does not exist|schema cache)/i.test(error.message||'')) throw new Error('run "Note Reviews and Provisional Charts.sql" in Supabase first.');
+        throw new Error(error.message);
+      }
+    }
+    const prov = events.filter(e=>e.event_type==='provisional').length;
+    const t=document.createElement('div');
+    t.textContent=`✓ Flagged Notes Tracker — ${prov} provisional and ${events.length-prov} full assessment notes saved`;
+    t.style.cssText='position:fixed;top:60px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+    document.body.appendChild(t);setTimeout(()=>t.remove(),4000);
+  },
   _clinGoalsCommitChain: Promise.resolve(),
   async _commitClinGoalsFromNotes(rawRows){
     let parsed;
