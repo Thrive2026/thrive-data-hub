@@ -64,6 +64,19 @@ Billable hours, caseload, outreach % and engagement % are now computed in this h
 - **Checked against the old reports (11/9/26):** hours matched the 10/10–10/23 report exactly for 66 of 73 staff. The differences were notes released after that report was run. Engagement flags matched for 93–99% of clients, with misses from late-released notes.
 - **UKG** (PTO and overtime) isn't part of this. The hubs don't use PTO today.
 
+## UKG time: PTO, overtime and Productivity % (added 11/11/26)
+
+Upload both UKG "Calculated Time Summary" reports for the same pay period together, using the **⏱ UKG Time** box on Enter Data: *Community Productivity Report* and *Total Hours for Vlookup - Community Productivity Report*. Emily sends both every other Monday.
+
+- **Pay period:** read from the report's Counter Date and stored under the period's end date, the same key billable hours use.
+- **How the two files combine:** the Vlookup report covers every non-exempt employee across all cost centers, including ADMIN, so it's used for anyone in it. The adult-only report fills in anyone it leaves out (full-time exempt staff). Staff are matched by Employee Id.
+- **Hours for Calculation** uses the old productivity workbook's formula:
+  - Full-time: 80 + overtime − admin/meeting hours (ADMIN cost center) − PTO − floating holiday.
+  - Part-time/split: regular hours on adult cost centers + overtime + holiday worked 1.0 and 1.5.
+- **Stored in `pd`** as `hfc`, `pto`, `ot` and `adminHrs`.
+- **Community Hub** gets a **Productivity** column (billable hours ÷ Hours for Calculation, with a PTO badge and a hover breakdown). When UKG is loaded for the same pay period as the hours, both the hours target and Progress to Goal are scaled by Hours for Calculation ÷ 80 (FT) or 40 (PT), so PTO lowers what's expected instead of counting against the person. Periods without UKG show "—" and use the flat targets.
+- **Checked 11/11/26** on the 10/24–11/06 reports: Willie Richardson 60.88 billable ÷ 76.28 = 80% (8 hours of PTO); Earl McDonald 83%; Kimberly Paridon 65%.
+
 ### What each hub has (added 11/9/26)
 
 The checklist has two tabs. **What to upload** lists each file. **What each hub has** shows one card per hub (Community, Hospital, Courts & Jail, Linkage, Director, Clinical Director, Executive, Outcomes, Flagged Notes Tracker, BD Dashboard, Data & Staff Hub). Each card lists every dataset that hub shows, how far its data goes, and which upload it comes from, with a green, amber or red dot. The hub's badge (Up to date / Due soon / Old or missing data) is its worst dataset, and hubs with old data are listed first. A stale dataset has an **Upload ↓** button that jumps to the right upload box. To change which hub shows what, edit `HUB_FEEDS`, or `HUB_DATASETS` for the dataset names, in `index.html`.
