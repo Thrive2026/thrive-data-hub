@@ -17,6 +17,7 @@
 <meta charset="UTF-8">
 <title>Thrive Data & Staff Hub</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://thrive-hub.onrender.com/shared/thrive-account-menu.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -46,7 +47,26 @@ h3{font-size:16px;font-weight:600}
 .serif{font-family:'Fraunces',Georgia,serif;font-weight:400;letter-spacing:-0.02em}
 .mono{font-family:'IBM Plex Mono',monospace}
 .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-@media(max-width:880px){.shell{grid-template-columns:1fr}.side{display:none !important}}
+@media(max-width:880px){.shell{grid-template-columns:1fr}.side{display:none !important}
+  nav.side.open{display:flex !important;position:fixed;top:0;left:0;height:100vh;width:240px;max-width:82vw;z-index:300}
+  .nav-backdrop.open{display:block;position:fixed;inset:0;background:rgba(10,16,50,.5);z-index:290}
+  .menu-btn{display:inline-flex !important}
+  header.topbar{padding:10px 14px}
+  #view{padding-left:14px !important;padding-right:14px !important}}
+.menu-btn{display:none;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);color:#fff;width:32px;height:32px;border-radius:4px;cursor:pointer;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.nav-backdrop{display:none}
+/* Standard sign-in card (calibration 11/12/26) */
+.ag-wrap{position:fixed;inset:0;z-index:99999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}
+.ag-card{background:var(--paper);border:1px solid var(--rule);border-radius:8px;box-shadow:var(--shadow);padding:34px 30px;max-width:360px;width:100%}
+.ag-mark{font-family:'Fraunces',Georgia,serif;font-style:italic;font-size:26px;color:var(--ink)}
+.ag-sub{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--thrive-blue);font-weight:600;margin:4px 0 22px}
+.ag-card label{display:block;font-size:11px;font-weight:600;color:var(--ink-soft);margin-bottom:5px}
+.ag-card input{width:100%;padding:9px 11px;border:1px solid var(--rule);border-radius:5px;margin-bottom:14px;font-size:13.5px;font-family:inherit;background:var(--bg);color:var(--ink)}
+.ag-card input:focus{outline:2px solid var(--thrive-blue);outline-offset:1px}
+.ag-card button{width:100%;padding:10px;background:var(--thrive-blue);color:#fff;border:none;border-radius:5px;font-weight:600;font-size:13.5px;cursor:pointer;font-family:inherit}
+.ag-card button:disabled{opacity:.6;cursor:default}
+.ag-err{display:none;color:var(--bad);font-size:12px;margin:-6px 0 14px;line-height:1.4}
+.ag-hint{font-size:11px;color:var(--muted);margin-top:14px;text-align:center}
 nav.side{background:var(--thrive-blue-dark);color:#cdd4f0;border-right:1px solid #0e1638;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
 nav.side .brand{padding:18px 20px;border-bottom:1px solid #0e1638;display:flex;align-items:center;gap:12px}
 nav.side .brand img{height:34px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.2))}
@@ -137,23 +157,23 @@ select,input,button,textarea{font-family:inherit}
 <!-- WHOLE-PAGE SIGN-IN (10/29/26): Data & Staff Hub is now behind Supabase Auth like Outcomes.
      Any Thrive Tools account with a reviewers row can view and upload; roster EDITING is still
      limited to EDIT_ALLOWLIST via the separate Unlock step on Staff & Settings. -->
-<div id="dsLoginScreen" style="position:fixed;inset:0;z-index:99999;background:#f7f3ec;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Sans',system-ui,sans-serif;">
-  <div style="background:#fff;border:1px solid #dcd6c8;border-radius:12px;padding:32px;max-width:360px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-    <img id="dsLoginLogo" alt="Thrive Peer Recovery Services" style="height:44px;width:auto;display:block;margin-bottom:14px;">
-    <div style="font-family:'Fraunces',serif;font-weight:500;font-size:1.25rem;color:#1a2861;margin-bottom:6px;">Thrive Data &amp; Staff Hub</div>
-    <div id="dsLoginChecking" style="font-size:0.85rem;color:#666;">Checking your sign-in…</div>
+<div id="dsLoginScreen" class="ag-wrap">
+  <div class="ag-card">
+    <div class="ag-mark">Thrive</div>
+    <div class="ag-sub">Data &amp; Staff Hub</div>
+    <div id="dsLoginChecking" style="font-size:13px;color:var(--muted)">Checking your sign-in…</div>
     <div id="dsLoginForm" style="display:none">
-      <div style="font-size:0.85rem;color:#666;margin-bottom:18px;">This is where Thrive's program data and staff roster are uploaded. Sign in with your Thrive Tools account. Contact Brandon if you need access set up.</div>
-      <label style="display:block;font-size:0.8rem;color:#666;margin-bottom:4px;">Email</label>
-      <input id="dsLoginEmail" type="email" autocomplete="username" style="width:100%;padding:8px 10px;border:1px solid #dcd6c8;border-radius:6px;margin-bottom:10px;font-size:0.9rem;box-sizing:border-box;">
-      <label style="display:block;font-size:0.8rem;color:#666;margin-bottom:4px;">Password</label>
-      <input id="dsLoginPassword" type="password" autocomplete="current-password" style="width:100%;padding:8px 10px;border:1px solid #dcd6c8;border-radius:6px;margin-bottom:6px;font-size:0.9rem;box-sizing:border-box;" onkeydown="if(event.key==='Enter')dsHandleLogin()">
-      <div id="dsLoginError" style="display:none;color:#a3311a;font-size:0.8rem;margin-bottom:10px;"></div>
-      <button id="dsLoginBtn" onclick="dsHandleLogin()" style="width:100%;padding:10px;background:#283c8c;color:#fff;border:none;border-radius:6px;font-weight:600;font-size:0.9rem;cursor:pointer;">Sign In</button>
+      <label for="dsLoginEmail">Email</label>
+      <input id="dsLoginEmail" type="email" autocomplete="username" placeholder="you@thrivepeersupport.com">
+      <label for="dsLoginPassword">Password</label>
+      <input id="dsLoginPassword" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')dsHandleLogin()">
+      <div id="dsLoginError" class="ag-err"></div>
+      <button id="dsLoginBtn" onclick="dsHandleLogin()">Sign In</button>
+      <div class="ag-hint">Forgot your password or need access? Contact Brandon.</div>
     </div>
   </div>
 </div>
-<button id="dsSignOutBtn" onclick="dsSignOut()" style="display:none;position:fixed;bottom:16px;right:16px;z-index:99998;padding:8px 14px;background:#fff;border:1px solid #dcd6c8;border-radius:20px;font-size:0.78rem;color:#666;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.08);">Sign Out</button>
+<div class="nav-backdrop" id="navBackdrop" onclick="closeMobileNav()"></div>
 <div class="shell">
   <nav class="side" id="sidebar"></nav>
   <div style="display:flex;flex-direction:column;min-width:0">
@@ -814,6 +834,7 @@ async function syncFromSupabase(){
     // SV_SEEN records exactly what was loaded so sv() can detect conflicting edits later.
     if(allAppdata){ Object.values(SHARED_KEYS).forEach(key=>{ if(key!=='staff') SV_SEEN[key]=(key in byKey&&byKey[key]!=null)?byKey[key]:null; }); }
     if(staffRows){ SV_SEEN.staff=(staffRows[0]&&staffRows[0].value!=null)?staffRows[0].value:null; }
+    applyClinicalTargets(parse('clinical_targets'));
     const pd=parse('pd');if(pd&&typeof pd==='object'){S.pd=pd;cacheLocal('p',S.pd);}
     const up=parse('uploads');if(up){S.up=up;cacheLocal('up',S.up);}
     const supOv=parse('sup_overrides');if(supOv){S.supOverrides=supOv;cacheLocal('supov',S.supOverrides);}
@@ -942,132 +963,14 @@ const PRS_GOAL_BIWEEKLY_FT=3638; // 26 hrs/wk × $69.96/hr × 2 weeks
 const PRS_GOAL_BIWEEKLY_PT=1819; // 13 hrs/wk × $69.96/hr × 2 weeks
 
 // Full company-wide SDEF — Provider Match needs all staff for cross-program referrals
-const SDEF=[
-  {id:64,  fn:'Willie',    ln:'Richardson',  mgr:'Brian',   tp:'FT',reg:'Cle E',               nt:''},
-  {id:290, fn:'Earl',      ln:'McDonald',    mgr:'Brian',   tp:'FT',reg:'Cle W',               nt:''},
-  {id:480, fn:'Brittany',  ln:'Zimmerman',   mgr:'Brian',   tp:'FT',reg:'SW',                  nt:''},
-  {id:497, fn:'Terrance',  ln:'Gray',        mgr:'Brian',   tp:'FT',reg:'Cle W',               nt:''},
-  {id:620, fn:'Tey',       ln:'Miller',      mgr:'Brian',   tp:'FT',reg:'Dayton',              nt:'',al:'Kayla Miller'},
-  {id:668, fn:'Tamara',    ln:'Dorroh',      mgr:'Brian',   tp:'PT',reg:'Cle E',               nt:''},
-  {id:686, fn:'Kimberly',  ln:'Paridon',     mgr:'Brian',   tp:'FT',reg:'NEO',                 nt:'Departed (per 5/18/26 supervision-list reconciliation)',status:'Inactive'},
-  {id:688, fn:'Angella',   ln:'Richard',     mgr:'Brian',   tp:'PT',reg:'Youngstown',          nt:''},
-  {id:775, fn:'Hollie',    ln:'Kosek',       mgr:'Brian',   tp:'FT',reg:'Liverpool',           nt:''},
-  {id:810, fn:'Lisa',      ln:'Colbert',     mgr:'Brian',   tp:'PT',reg:'Cle E',               nt:''},
-  {id:894, fn:'Annika',    ln:'Norton',      mgr:'Brian',   tp:'PT',reg:'Cle W',               nt:''},
-  {id:896, fn:'Becky',     ln:'Tucholski',   mgr:'Brian',   tp:'PT',reg:'Warren',              nt:''},
-  {id:696, fn:'Sayeh',     ln:'Ghane',       mgr:'Brian',   tp:'FT',reg:'Warren',              nt:'Trumbull WD'},
-  {id:936, fn:'Dawn',      ln:'Cassidy',     mgr:'Brian',   tp:'PT',reg:'Lorain',              nt:''},
-  {id:313, fn:'Cindy',     ln:'Kozlik',      mgr:'Cara',    tp:'FT',reg:'Akron',               nt:''},
-  {id:425, fn:'Robert',    ln:'Roach',       mgr:'Cara',    tp:'FT',reg:'Central',             nt:''},
-  {id:637, fn:'Katerina',  ln:'Treer',       mgr:'Cara',    tp:'PT',reg:'Cle W',               nt:'MH only'},
-  {id:699, fn:'Donna',     ln:'Bell',        mgr:'Cara',    tp:'PT',reg:'SW',                  nt:''},
-  {id:713, fn:'Nicholas',  ln:'Frisby',      mgr:'Cara',    tp:'FT',reg:'Warren',              nt:''},
-  {id:783, fn:'Brittney',  ln:'Sakmar',      mgr:'Cara',    tp:'PT',reg:'Youngstown',          nt:''},
-  {id:796, fn:'Jamie',     ln:'Kaucic',      mgr:'Cara',    tp:'FT',reg:'Warren',              nt:''},
-  {id:901, fn:'Joanna',    ln:'Cheek',       mgr:'Cara',    tp:'PT',reg:'Summit/Stark',        nt:'Last day 5/6/26',status:'Inactive'},
-  {id:903, fn:'Carl',      ln:'Curtis',      mgr:'Cara',    tp:'FT',reg:'Montgomery',          nt:'Last day 5/15/26',status:'Inactive'},
-  {id:908, fn:'Alicia',    ln:'Kirkman',     mgr:'Cara',    tp:'PT',reg:'Cle W',               nt:''},
-  {id:920, fn:'Monica',    ln:'Sparks',      mgr:'Cara',    tp:'PT',reg:'Columbus',            nt:''},
-  {id:711, fn:'Graeme',    ln:'Baker',       mgr:'Cara',    tp:'FT',reg:'Warren',              nt:'Added 4/11/26'},
-  {id:934, fn:'Tahleef',   ln:'Fitzgerald',  mgr:'Cara',    tp:'PT',reg:'Lebanon',             nt:'Orientation 5/22'},
-  {id:833, fn:'Jennifer',  ln:'Hake',        mgr:'Cara',    tp:'FT',reg:'Trumbull Jail',       nt:'Transitioning 5/11'},
-  {id:368, fn:'Dustin',    ln:'Hurst',       mgr:'Cara',    tp:'FT',reg:'NEO/BD Courts',       nt:'Departed (per 5/18/26 supervision-list reconciliation)',status:'Inactive'},
-  {id:137, fn:'Steven',    ln:'Sweatte',     mgr:'John',    tp:'FT',reg:'Columbus',            nt:''},
-  {id:348, fn:'Nicole',    ln:'Descenna',    mgr:'John',    tp:'PT',reg:'Warren',              nt:''},
-  {id:595, fn:'Scott',     ln:'Works',       mgr:'John',    tp:'FT',reg:'Cincinnati',          nt:''},
-  {id:692, fn:'Judy',      ln:'Middleton',   mgr:'John',    tp:'FT',reg:'Cincinnati',          nt:''},
-  {id:776, fn:'Jeffery',   ln:'Magden',      mgr:'John',    tp:'FT',reg:'Loraine',             nt:''},
-  {id:795, fn:'Charlotte', ln:'Bobbitt',     mgr:'John',    tp:'PT',reg:'Warren',              nt:''},
-  {id:805, fn:'Michael',   ln:'Montalvo',    mgr:'John',    tp:'FT',reg:'Cle W',               nt:''},
-  {id:811, fn:'Nadia',     ln:'Castille',    mgr:'John',    tp:'FT',reg:'Cle W',               nt:''},
-  {id:859, fn:'Sky',       ln:'Kelley',      mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Transferred from Community (was under John, Cle W) to Crisis Center FT — corrected 9/11',program:'Crisis Center',email:'skelley@thrivepeersupport.com',role:'staff',shift:'4P-12A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:1006},
-  {id:890, fn:'Melvina',   ln:'Williams',    mgr:'John',    tp:'FT',reg:'Cle W',               nt:''},
-  {id:893, fn:'Philip',    ln:'Taylor',      mgr:'John',    tp:'PT',reg:'Cle W',               nt:'', al:'Phillip Taylor'},
-  {id:935, fn:'William',   ln:'Mayor Jr.',   mgr:'John',    tp:'FT',reg:'Warren',              nt:'New hire — orientation'},
-  {id:198, fn:'Royce',     ln:'Ruffin',      mgr:'Luke',    tp:'FT',reg:'Cle W',               nt:''},
-  {id:687, fn:'Laura',     ln:'Jackson',     mgr:'Luke',    tp:'PT',reg:'Cle W/E',             nt:''},
-  {id:728, fn:'Melissa',   ln:'McCauley',    mgr:'Luke',    tp:'FT',reg:'Warren',              nt:''},
-  {id:797, fn:'Jennifer',  ln:'Greenwald',   mgr:'Luke',    tp:'PT',reg:'Warren',              nt:''},
-  {id:829, fn:'Chanae',    ln:'Jordan',      mgr:'Luke',    tp:'FT',reg:'Cle E',               nt:''},
-  {id:852, fn:'Brandi',    ln:'Headley',     mgr:'Luke',    tp:'PT',reg:'Columbiana',          nt:'Departed (per 5/18/26 supervision-list reconciliation)',status:'Inactive'},
-  {id:919, fn:'Angela',    ln:'Jones',       mgr:'Luke',    tp:'FT',reg:'Toledo',              nt:''},
-  {id:420, fn:'James',     ln:'Zimmerman',   mgr:'Luke',    tp:'FT',reg:'SW',                  nt:''},
-  {id:517, fn:'Carmelita', ln:'Woods',       mgr:'Luke',    tp:'FT',reg:'Dayton',              nt:''},
-  {id:758, fn:'Charlotte', ln:'Murdock',     mgr:'Luke',    tp:'FT',reg:'Louisville',          nt:''},
-  {id:815, fn:'Robert',    ln:'Woods',       mgr:'Luke',    tp:'PT',reg:'Cle E',               nt:''},
-  {id:856, fn:'Darrell',   ln:'Williams',    mgr:'Luke',    tp:'PT',reg:'Cuyahoga',            nt:''},
-  {id:867, fn:'Kayla',     ln:'Wludyga',     mgr:'Luke',    tp:'PT',reg:'Trumbull',            nt:''},
-  // Courts/Jail/Hospital staff kept in SDEF for Provider Match cross-referencing
-  {id:863, fn:'Carmen',    ln:'Manuel',      mgr:'Rachel',  tp:'FT',reg:'Cle W',               nt:'Transitioning 5/11'},
-  {id:507, fn:'Nancy',     ln:'Begly',       mgr:'Rachel',  tp:'FT',reg:'Akron',               nt:'ADC'},
-  {id:512, fn:'Kristy',    ln:'Temple',      mgr:'Rachel',  tp:'FT',reg:'NEO',                 nt:'ADC Liaison'},
-  {id:530, fn:'Mario',     ln:'Linder',      mgr:'Rachel',  tp:'PT',reg:'NEO',                 nt:'ADC'},
-  {id:553, fn:'Kelly',     ln:'Brewer',      mgr:'Rachel',  tp:'FT',reg:'Cle Jail',            nt:''},
-  {id:574, fn:'Rashad',    ln:'Alaji',       mgr:'Rachel',  tp:'FT',reg:'Cle E',               nt:'COSSAP/Oriana'},
-  {id:733, fn:'Brian',     ln:'Edwards',     mgr:'Rachel',  tp:'PT',reg:'NEO',                 nt:'ADC'},
-  {id:804, fn:'Christopher',ln:'Cooper',     mgr:'Rachel',  tp:'FT',reg:'NEO',                 nt:'Drug Court'},
-  {id:862, fn:'Jeffrey',   ln:'Collins',     mgr:'Rachel',  tp:'FT',reg:'Cle W',               nt:''},
-  {id:865, fn:'Whister',   ln:'Winford',     mgr:'Rachel',  tp:'FT',reg:'Cle Jail',            nt:''},
-  {id:874, fn:'Michael',   ln:'Aybar',       mgr:'Rachel',  tp:'FT',reg:'NEO',                 nt:'Departed',status:'Inactive'},
-  {id:877, fn:'Elisabeth', ln:'Pressler',    mgr:'Rachel',  tp:'PT',reg:'ADC',                 nt:''},
-  {id:885, fn:'Aubrey',    ln:'Dobrzeniecki',mgr:'Rachel',  tp:'FT',reg:'Cle Jail',            nt:'On hold—clearance'},
-  {id:300, fn:'Jessica',   ln:'Ripley',      mgr:'Jessica', tp:'FT',reg:'Warren',              nt:'Trumbull WD'},
-  {id:319, fn:'Brandy',    ln:'Altop',       mgr:'Jessica', tp:'PT',reg:'SEO',                 nt:''},
-  {id:354, fn:'Mario',     ln:'Ybarbo',      mgr:'Jessica', tp:'FT',reg:'SW',                  nt:'CPT Liaison—no billables'},
-  {id:608, fn:'Juanita',   ln:'Webb',        mgr:'Jessica', tp:'FT',reg:'Mendedeed',           nt:'Liaison ≤5 clients'},
-  {id:719, fn:'Florencia', ln:'Willis',      mgr:'Jessica', tp:'FT',reg:'Cle W',               nt:'Safe Harbor'},
-  {id:764, fn:'Misty',     ln:'Breedlove',   mgr:'Jessica', tp:'FT',reg:'Southern',            nt:'Mendedeed'},
-  {id:768, fn:'Jordan',    ln:'Ray',         mgr:'Jessica', tp:'FT',reg:'Cle W',               nt:'CRC',al:'Anitra Ray'},
-  {id:889, fn:'Ashley',    ln:'Allen',       mgr:'Jessica', tp:'FT',reg:'SW',                  nt:'Clinton Liaison'},
-  {id:904, fn:'Michael',   ln:'Lutz',        mgr:'Jessica', tp:'FT',reg:'ALS',                 nt:'Mendedeed'},
-  {id:875, fn:'Jennifer',  ln:'Barbera',     mgr:'Jessica', tp:'FT',reg:'Trumbull',            nt:'Transitioning 5/11'},
-  {id:915, fn:'Sarah',     ln:'Adams',       mgr:'Jessica', tp:'FT',reg:'ALS',                 nt:'ALS Liaison—no billables'},
-  {id:940, fn:'Jessica',   ln:'Marton',      mgr:'Jessica', tp:'FT',reg:'Trumbull',             nt:'New hire eff. 6/15/2026 — Trumbull Jail, ID pending — replaces Jennifer Barbera'},
-  {id:247, fn:'Nancy',     ln:'Joseph',      mgr:'Angelica',tp:'PT',reg:'Metro Parma',         nt:'OD2A',program:'Hospital'},
-  {id:408, fn:'Rondye',    ln:'Brown',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Team Lead, 3rd shift — was misfiled under Hospital before Crisis Center had its own hub, corrected 9/11',program:'Crisis Center',email:'rbrown@thrivepeersupport.com',role:'team_lead',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:true,dateOfHire:'2026-07-27',supervisorId:548},
-  {id:460, fn:'Stephen',   ln:'Sidoti',      mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:503, fn:'Susan',     ln:'Zelenka',     mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:548, fn:'David',     ln:'Begly',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Manager, Crisis Center — was misfiled under Hospital before Crisis Center had its own hub, corrected 9/11',program:'Crisis Center',email:'dbegly@thrivepeersupport.com',role:'manager',shift:'7A-3P',fte:1,weeklyTargetHours:null,teamLead:false,dateOfHire:'2026-07-27',supervisorId:null},
-  {id:598, fn:'Tamara',    ln:'Ash',         mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:617, fn:'Derek',     ln:'Christopher', mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:634, fn:'Anna',      ln:'Stevens',     mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:709, fn:'Jackie',    ln:'Kovach',      mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Transferred from Hospital (was under Angelica, listed departed) to Crisis Center FT — corrected 9/11',program:'Crisis Center',email:'jkovach@thrivepeersupport.com',role:'staff',shift:'8A-4P',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:548},
-  {id:780, fn:'Gabrielle', ln:'Sabolich',    mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'ACO — caseload 13',program:'Hospital'},
-  {id:802, fn:'La Vinia',  ln:'Evans',       mgr:'Angelica',tp:'FT',reg:'Franklin/Mt.Carm',    nt:'Hospital inreach — reactivated 5/19/26',program:'Hospital'},
-  {id:882, fn:'Ross',      ln:'Scott',       mgr:'Angelica',tp:'PT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:891, fn:'Janine',    ln:'Roulette',    mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'',program:'Hospital'},
-  {id:910, fn:'Raegen',    ln:'Dalton',      mgr:'Angelica',tp:'FT',reg:'NEO',                 nt:'Departed',status:'Inactive',program:'Hospital'},
-  {id:909, fn:'Hunter-Dane',ln:'von Carlowitz',mgr:'Angelica',tp:'PT',reg:'NEO',              nt:'',program:'Hospital'},
-  // BH Linkage (Debra West) — real Pimsy IDs confirmed against the 7/2/26 HR roster export.
-  {id:835, fn:'Genieva',   ln:'Sandel',      mgr:'Debra',   tp:'FT',reg:'Buckeye',             nt:'',program:'BH Linkage'},
-  {id:610, fn:'Danielle',  ln:'Ricketts',    mgr:'Debra',   tp:'FT',reg:'Caresource',          nt:'',program:'BH Linkage'},
-  {id:860, fn:'Kristin',   ln:'Reynolds',    mgr:'Debra',   tp:'FT',reg:'Windsor Laurelwood',  nt:'',program:'BH Linkage'},
-  {id:801, fn:'Lauren',    ln:'Garczynski',  mgr:'Debra',   tp:'FT',reg:'Windsor Laurelwood',  nt:'',program:'BH Linkage'},
-  {id:573, fn:'Kristian',  ln:'Matheny',     mgr:'Debra',   tp:'FT',reg:'RiverVista BH - Franklin', nt:'',program:'BH Linkage'},
-  {id:880, fn:'Jessica',   ln:'Weygandt',    mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Transferred from BH Linkage (was under Debra) to Crisis Center FT — corrected 9/11',program:'Crisis Center',email:'jweygandt@thrivepeersupport.com',role:'staff',shift:'8A-4P',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:548},
-  {id:895, fn:'Alyse',     ln:'Byrd',        mgr:'Debra',   tp:'FT',reg:'Caresource',          nt:'',program:'BH Linkage'},
-  {id:881, fn:'Amber',     ln:'Cooley',      mgr:'Debra',   tp:'FT',reg:'RiverVista BH - Franklin', nt:'',program:'BH Linkage'},
-  {id:900, fn:'David',     ln:'Lundgren',    mgr:'Debra',   tp:'FT',reg:'Highland Springs',    nt:'Not yet in Linkage Hub\u2019s own 8-person provider list \u2014 confirm status',program:'BH Linkage'},
-  // Crisis Center (David Begly) \u2014 full identity merge, 9/11/26. Added from Crisis Center's own
-  // roster (previously tracked separately with a 4-digit passcode, no shared identity). New IDs
-  // 1001-1014 assigned above the highest existing SDEF id (940) to avoid collisions.
-  {id:1001, fn:'Michelle', ln:'Macklin',     mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'7/20 start',program:'Crisis Center',email:'mmacklin@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:408},
-  {id:1002, fn:'Margaret', ln:'Gross',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'mgross@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',status:'Onboarding',supervisorId:408},
-  {id:1003, fn:'Donald',   ln:'Lykes',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'dlykes@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',status:'Pending Acceptance',supervisorId:408},
-  {id:1004, fn:'Megan',    ln:'Pedala',      mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'mpedala@thrivepeersupport.com',role:'staff',shift:'4P-12A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:1006},
-  {id:1005, fn:'Melody',   ln:'Robertson',   mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'7/20 start',program:'Crisis Center',email:'mrobertson@thrivepeersupport.com',role:'staff',shift:'4P-12A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:1006},
-  {id:1006, fn:'Harold',   ln:'Watkins',     mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Team Lead, 2nd shift — deactivated 2026-09-11, no longer with the center',program:'Crisis Center',email:'hwatkins@thrivepeersupport.com',role:'team_lead',shift:'4P-12A',fte:1,weeklyTargetHours:40,teamLead:true,dateOfHire:'2026-07-27',supervisorId:548,status:'Inactive'},
-  {id:1007, fn:'Lily',     ln:'Madison',     mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'7/20 start',program:'Crisis Center',email:'lmadison@thrivepeersupport.com',role:'staff',shift:'4P-12A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:1006},
-  {id:1008, fn:'Charles',  ln:'Christian',   mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'Shifted from 4p-12 to 8a-4p and full time per conversation 8/18',program:'Crisis Center',email:'cchristian@thrivepeersupport.com',role:'staff',shift:'8A-4P',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',status:'Onboarding',supervisorId:548},
-  {id:1009, fn:'Mike',     ln:'Bailey',      mgr:'David',   tp:'PT',reg:'Glick Recovery Campus', nt:'Target 32 hrs/week',program:'Crisis Center',email:'mbailey@thrivepeersupport.com',role:'staff',shift:'8A-4P',fte:0.8,weeklyTargetHours:32,teamLead:false,dateOfHire:'2026-07-27',supervisorId:548},
-  {id:1010, fn:'Jayme',    ln:'Tuel',        mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'jtuel@thrivepeersupport.com',role:'staff',shift:'8A-4P',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-07-27',supervisorId:548},
-  {id:1011, fn:'Andre',    ln:'Calhoun',     mgr:'David',   tp:'PT',reg:'Glick Recovery Campus', nt:'Target 24 hrs/week; varies Wed\u2013Sun \u2014 see Crisis Center hub for exact days/hours',program:'Crisis Center',email:'acalhoun@thrivepeersupport.com',role:'staff',shift:'Varies (see note)',fte:0.6,weeklyTargetHours:24,teamLead:false,dateOfHire:'LAUNCH',supervisorId:548},
-  {id:1012, fn:'LaVance',  ln:'Lining',      mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'llining@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',supervisorId:408},
-  {id:1013, fn:'Erycka',   ln:'Allen',       mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'eallen@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',supervisorId:408},
-  {id:1014, fn:'Garnell',  ln:'Jamison',     mgr:'David',   tp:'FT',reg:'Glick Recovery Campus', nt:'',program:'Crisis Center',email:'gjamison@thrivepeersupport.com',role:'staff',shift:'12A-8A',fte:1,weeklyTargetHours:40,teamLead:false,dateOfHire:'2026-08-10',supervisorId:408},
-];
+// Built-in staff list (names, managers, emails, shifts) removed 11/12/26. The roster lives only in
+// the shared 'staff' key. Run the one-time Roster Backfill (thrive-hub, 11/11/26) before deploying.
+const SDEF=[];
 
-const PROVIDER_MAP_DATA={"668":{"gender":"Female","program":"Community","city":"Mentor","county":"Lake","zip":"44060","inPerson":"Yes","telehealth":"Yes","notes":"finally getting clients that engage"},"64":{"gender":"Male","program":"Community","city":"Euclid","county":"Cuyahoga","zip":"44119","inPerson":"No","telehealth":"No","notes":"no update doing well"},"290":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"Yes","notes":"no update, very consistent with job requirements"},"688":{"gender":"Female","program":"Community","city":"Youngstown","county":"Mahoning","zip":"44509","inPerson":"Yes","telehealth":"Yes","notes":"Slowly increasing billables and hours"},"480":{"gender":"Female","program":"Community","city":"Casstown","county":"Miami","zip":"45312","inPerson":"Yes","telehealth":"Yes","notes":"has no hrs or notes in for 5/8-5/14/26, called, emailed, texted=no response, no PTO request"},"810":{"gender":"Female","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44111","inPerson":"No","telehealth":"No","notes":"still working other job, discussed late notes"},"620":{"gender":"Male","program":"Community","city":"Youngstown","county":"Mahoning","zip":"44502","inPerson":"Yes","telehealth":"Yes","notes":"no update, very consistent with job requirements"},"497":{"gender":"Male","program":"Community","city":"Willoughby","county":"Lake","zip":"44094","inPerson":"Yes","telehealth":"Yes","notes":"keeping a close eye, had supervision and was straightforward"},"896":{"gender":"Female","program":"Community","city":"Girard","county":"Trumbull","zip":"44420","inPerson":"No","telehealth":"Yes","notes":"sent job requirement for late notes"},"894":{"gender":"Female","program":"Community","city":"Hinckley","county":"Medina","zip":"44233","inPerson":"No","telehealth":"No","notes":"gradually increased hrs & billables last 3 pay periods, good work"},"696":{"gender":"Female","program":"Trumbull Courts","city":"Warren","county":"Trumbull","zip":"44484","inPerson":"No","telehealth":"No","notes":"newly added, will do supervision next week"},"313":{"gender":"Female","program":"Community","city":"Bath Township","county":"Summit","zip":"44333","inPerson":"No","telehealth":"No","notes":"needs time to adjust to new peers added"},"637":{"gender":"Female","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44129","inPerson":"No","telehealth":"No","notes":""},"783":{"gender":"Female","program":"Community","city":"Youngstown","county":"Mahoning","zip":"44511","inPerson":"Yes","telehealth":"No","notes":"Mahoning County Only for in person"},"699":{"gender":"Female","program":"Community","city":"Moraine","county":"Montgomery","zip":"45439","inPerson":"Yes","telehealth":"Yes","notes":""},"425":{"gender":"Male","program":"Community","city":"Columbus","county":"Franklin","zip":"43205","inPerson":"Yes","telehealth":"Yes","notes":""},"713":{"gender":"Male","program":"Special Programs","city":"Youngstown","county":"Trumbull","zip":"44511","inPerson":"No","telehealth":"No","notes":"check in before assigning"},"796":{"gender":"Female","program":"","city":"Youngstown","county":"Mahoning","zip":"44514","inPerson":"No","telehealth":"No","notes":"needs one week pause / is expecting 2 referrals to come through following week"},"920":{"gender":"Female","program":"Community","city":"Westerville","county":"Franklin","zip":"43081","inPerson":"Yes","telehealth":"Yes","notes":"check in before assigning"},"711":{"gender":"Male","program":"Community/ Trumbull courts","city":"Warren","county":"Trumbull","zip":"44485","inPerson":"Yes","telehealth":"Yes","notes":""},"934":{"gender":"Male","program":"Community","city":"Dayton","county":"Warren","zip":"45405","inPerson":"No","telehealth":"No","notes":"expected to complete orientation 5/22"},"908":{"gender":"Female","program":"","city":"Cleveland","county":"Cuyahoga","zip":"44102","inPerson":"Yes","telehealth":"Yes","notes":"struggling with outreach/documentation/would not add more than 1 more"},"768":{"gender":"Female","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"No","notes":""},"608":{"gender":"Female","program":"Special Programs","city":"Lawrence","county":"","zip":"","inPerson":"Yes","telehealth":"Yes","notes":"Covers Lawrence and Scioto Counties"},"764":{"gender":"Female","program":"Special Programs","city":"Ironton","county":"Lawrence","zip":"45638","inPerson":"Yes","telehealth":"Yes","notes":"Mended Reed Referral/Clients only"},"889":{"gender":"Female","program":"Warren/Clinton Liasion","city":"Middletown","county":"Warren","zip":"45042","inPerson":"Yes","telehealth":"Yes","notes":"warren/clinton Liasion taking community too just NOT court clients"},"904":{"gender":"Male","program":"Community","city":"Ironton","county":"Adams","zip":"45638","inPerson":"Yes","telehealth":"No","notes":"Mended Reed Referral/Clients only"},"915":{"gender":"Female","program":"ALS","city":"Franklin Furnace","county":"Scioto","zip":"45629","inPerson":"Yes","telehealth":"Yes","notes":"Liaison/ Partial caseload"},"354":{"gender":"Male","program":"CTP/ALS Liasion","city":"Riverside","county":"Montgomery","zip":"45431","inPerson":"No","telehealth":"No","notes":""},"300":{"gender":"Female","program":"Trumbull Courts","city":"Cortland","county":"Trumbull","zip":"44410","inPerson":"Yes","telehealth":"No","notes":""},"859":{"gender":"Female","program":"Community","city":"Lakewood","county":"Cuyahoga","zip":"44107","inPerson":"No","telehealth":"No","notes":"Maxed out, caseload needs cleaned up"},"890":{"gender":"Female","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44120","inPerson":"Yes","telehealth":"Yes","notes":"Evaluate progress this week"},"893":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44135","inPerson":"Yes","telehealth":"Yes","notes":"Needs in-person in area"},"935":{"gender":"Male","program":"Community","city":"Warren","county":"Trumbull","zip":"44485","inPerson":"No","telehealth":"No","notes":"New Hire- still in orientation"},"692":{"gender":"Female","program":"Community","city":"Cincinnati","county":"Hamilton","zip":"45233","inPerson":"Yes","telehealth":"Yes","notes":"Off pause, but close to limit"},"348":{"gender":"Female","program":"Community","city":"Cortland","county":"Trumbull","zip":"44410","inPerson":"Yes","telehealth":"Yes","notes":"PT Close to limit"},"795":{"gender":"Female","program":"Community","city":"Niles","county":"Trumbull","zip":"44446","inPerson":"Yes","telehealth":"Yes","notes":"Could use a few more peers"},"811":{"gender":"Female","program":"Community","city":"Independence","county":"Cuyahoga","zip":"44131","inPerson":"Yes","telehealth":"Yes","notes":"Close to limit, caseload needs cleaned up"},"776":{"gender":"Male","program":"Community","city":"Lorain","county":"Lorain","zip":"44052","inPerson":"Yes","telehealth":"Yes","notes":"Needs peers"},"595":{"gender":"Male","program":"Community","city":"Cincinnati","county":"Hamilton","zip":"45255","inPerson":"Yes","telehealth":"Yes","notes":"Can take a few more"},"137":{"gender":"Male","program":"Community","city":"Reynoldsburg","county":"Franklin","zip":"43068","inPerson":"Yes","telehealth":"Yes","notes":"Could use a few more peers"},"805":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"Yes","notes":"OT met, can take more peers"},"829":{"gender":"Female","program":"Community","city":"Willoughby Hills","county":"Lake","zip":"44094","inPerson":"Yes","telehealth":"Yes","notes":""},"758":{"gender":"Female","program":"Community","city":"Louisville","county":"Stark","zip":"44641","inPerson":"No","telehealth":"No","notes":""},"775":{"gender":"Female","program":"Community","city":"Wellsville","county":"Columbiana","zip":"43968","inPerson":"No","telehealth":"No","notes":"She is on Smitty's team now"},"797":{"gender":"Female","program":"Community","city":"Warren","county":"Trumbull","zip":"44483","inPerson":"Yes","telehealth":"Yes","notes":"needs peers"},"728":{"gender":"Female","program":"Community","city":"Fowler","county":"Trumbull","zip":"44418","inPerson":"Yes","telehealth":"Yes","notes":""},"815":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44110","inPerson":"Yes","telehealth":"No","notes":"Rob needs peers"},"198":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"No","notes":""},"420":{"gender":"Male","program":"Community","city":"Casstown","county":"Miami","zip":"45312","inPerson":"Yes","telehealth":"Yes","notes":""},"687":{"gender":"Female","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"Yes","notes":""},"517":{"gender":"Female","program":"Community","city":"Dayton","county":"Montgomery","zip":"45405","inPerson":"Yes","telehealth":"Yes","notes":""},"856":{"gender":"Male","program":"Community","city":"Cleveland","county":"Cuyahoga","zip":"44109","inPerson":"Yes","telehealth":"Yes","notes":""},"867":{"gender":"Female","program":"Community","city":"Niles","county":"Trumbull","zip":"44446","inPerson":"Yes","telehealth":"No","notes":"Yes to Ashtabula"},"919":{"gender":"Female","program":"","city":"Toledo","county":"Lucas","zip":"43607","inPerson":"Yes","telehealth":"Yes","notes":"will work with female and male clients"}};
+// Built-in gender/location/availability list removed 11/12/26 — those fields live on each staff
+// record and in pm_overrides (filled by the Roster Backfill). Kept as an empty object so the
+// display fallbacks below still work.
+const PROVIDER_MAP_DATA={};
 const RESOURCE_LINKS=[
   {cat:'Forms',label:'Supervision Form — Credentialed Staff',url:'https://thrivepeersupport.jotform.com/data/2024-supervision-form',desc:'Submit completed supervision for credentialed staff'},
   {cat:'Forms',label:'Medical Records Request Form',url:'https://thrivepeersupport.jotform.com/mphillips/medical-records-request-form',desc:'Request client medical records'},
@@ -1111,7 +1014,7 @@ async function svServerValue(key){
   return (rows[0]&&rows[0].value!=null)?rows[0].value:null;
 }
 async function sv(k,v){
-  try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}
+  if(LOCAL_OK.has(k)){try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}}
   const key=SHARED_KEYS[k];
   if(!(key&&typeof db!=='undefined'&&SB_KEY.length>50))return true;
   const body=JSON.stringify(v);
@@ -1144,7 +1047,13 @@ async function sv(k,v){
   return p;
 }
 // Caches a value in this browser only — used when loading, which must never write to Supabase.
-function cacheLocal(k,v){try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}}
+// Browser storage (11/12/26): only non-client conveniences may be cached in this browser —
+// the staff roster, productivity numbers, upload freshness and view choices. Renewals (client
+// numbers), tasks, staff notes, hospital outcomes and Linkage note data stay in memory only, and
+// copies saved by older versions are deleted on load.
+const LOCAL_OK=new Set(['s','p','up','upAt','impreg','supov','supimp','pmov','g','pp','role','view','selMgr','dirSel','editUnlocked','editUser','casAudit']);
+['r','t','nlogs','hospData','linkageData','linkageHistory','linkageNotesRaw'].forEach(k=>{try{localStorage.removeItem('ths_'+k);}catch(e){}});
+function cacheLocal(k,v){if(!LOCAL_OK.has(k))return;try{localStorage.setItem('ths_'+k,JSON.stringify(v));}catch(e){}}
 // Small visible warning for a failed save — console.error alone is too easy to miss, and this
 // class of bug (a save silently not landing in Supabase) is exactly what a manager has no way
 // to notice without something on-screen telling them.
@@ -1157,7 +1066,7 @@ function showSaveError(msg){
   document.body.appendChild(t);
   setTimeout(()=>t.remove(),8000);
 }
-function lv(k,d){try{const v=localStorage.getItem('ths_'+k);if(v!==null)return JSON.parse(v);return d;}catch(e){return d;}}
+function lv(k,d){if(!LOCAL_OK.has(k))return d;try{const v=localStorage.getItem('ths_'+k);if(v!==null)return JSON.parse(v);return d;}catch(e){return d;}}
 
 // ══════════════════════════════════════════════════════════
 // IMPORT REGISTRY — Data Catalog build-out (added 9/14/26, per the Data Ingestion
@@ -1172,7 +1081,7 @@ function recordImport(datasetKey, meta){
   meta = meta || {};
   const entry = {
     uploaded_at: new Date().toISOString(),
-    uploaded_by: S.editUser || S.role || 'Unknown',
+    uploaded_by: (DS_USER&&DS_USER.name) || S.editUser || 'Unknown', // the signed-in person (11/12/26), not the old "Viewing as" picker
     source_filename: meta.source_filename || S._lastFile || null,
     row_count: (typeof meta.row_count === 'number') ? meta.row_count : null,
     period_label: meta.period_label || null,
@@ -1330,12 +1239,16 @@ function parseQuickBooksPL(fileRows){
     if(localAdminCol<0) localAdminCol = qbFindColByLabel(headerRow, 'Administrative', start, end);
     const adminPool   = localAdminCol>=0 ? qbCellNum(fileRows, expensesRow, localAdminCol) : 0;
     const adminIncome = localAdminCol>=0 ? qbCellNum(fileRows, incomeRow, localAdminCol) : 0;
+    // 11/12/26: Administrative class COGS too, so the SLG Hub's company-wide totals use the same
+    // period as the divisions (they had been using fixed Jan–Jul figures).
+    const adminCogs   = localAdminCol>=0 ? qbCellNum(fileRows, cogsRow, localAdminCol) : 0;
+    const adminFound  = localAdminCol>=0;
     let localTotalCol = -1;
     for(let i=start;i<=end;i++){ if(qbCellText(headerRow[i])==='Total') localTotalCol=i; }
     const totalRev = localTotalCol>=0
       ? qbCellNum(fileRows, incomeRow, localTotalCol)
       : Object.values(divisions).reduce((s,d)=>s+d.income,0) + adminIncome;
-    return {divisions, adminPool, totalRev, adminIncome};
+    return {divisions, adminPool, totalRev, adminIncome, adminCogs, adminFound};
   }
 
   const columnGroups = qbDetectColumnGroups(fileRows, headerRowIdx, numCols);
@@ -1346,7 +1259,8 @@ function parseQuickBooksPL(fileRows){
     if(monthGroups.length >= 2){
       monthly = monthGroups.map(g=>{
         const built = buildDivisionsForRange(g.start, g.end);
-        return { period: g.label, adminPool: built.adminPool, totalRev: built.totalRev, divisions: built.divisions };
+        return { period: g.label, adminPool: built.adminPool, totalRev: built.totalRev, divisions: built.divisions,
+                 adminIncome: built.adminIncome, adminCogs: built.adminCogs, adminFound: built.adminFound };
       });
       overall = totalGroup
         ? buildDivisionsForRange(totalGroup.start, totalGroup.end)
@@ -1359,8 +1273,9 @@ function parseQuickBooksPL(fileRows){
               acc.divisions[t.key].personnel  += m.divisions[t.key].personnel;
             });
             acc.adminPool += m.adminPool; acc.totalRev += m.totalRev;
+            acc.adminIncome += m.adminIncome||0; acc.adminCogs += m.adminCogs||0; acc.adminFound = acc.adminFound && !!m.adminFound;
             return acc;
-          }, {divisions:{}, adminPool:0, totalRev:0});
+          }, {divisions:{}, adminPool:0, totalRev:0, adminIncome:0, adminCogs:0, adminFound:true});
     }
   }
   if(!overall) overall = buildDivisionsForRange(0, numCols-1);
@@ -1376,6 +1291,7 @@ function parseQuickBooksPL(fileRows){
 
   return {
     period, adminPool: overall.adminPool, totalRev: overall.totalRev, divisions: overall.divisions,
+    adminIncome: overall.adminIncome, adminCogs: overall.adminCogs, adminFound: !!overall.adminFound,
     monthly,
     mismatchWarning: mismatch>5
       ? `Division totals + Administrative income (${fmt$(sumCheck)}) don't quite match the file's Grand Total (${fmt$(overall.totalRev)}) — off by ${fmt$(mismatch)}. Numbers were still imported; worth spot-checking against the source file.`
@@ -1386,7 +1302,7 @@ function parseQuickBooksPL(fileRows){
 // object instead of mutating Director Hub's FINANCIAL_HISTORY/localStorage — this hub has no
 // live "current financial" view of its own to keep in sync, it only ever writes history points
 // for Director Hub to read.
-function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev){
+function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev, admin){
   const divisions = {};
   Object.keys(divisionsIn).forEach(function(key){
     const d = divisionsIn[key];
@@ -1401,7 +1317,11 @@ function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev){
       personnelRatio: d.income ? d.personnel/d.income : 0,
     };
   });
-  return { period: period, updated: new Date().toISOString().split('T')[0], adminPool: adminPool, totalRev: totalRev, divisions: divisions };
+  const entry = { period: period, updated: new Date().toISOString().split('T')[0], adminPool: adminPool, totalRev: totalRev, divisions: divisions };
+  // Administrative class's own income and COGS (11/12/26). Only stored when the file had an
+  // Administrative column, so a missing column never reads as $0.
+  if(admin && admin.adminFound) entry.adminClass = { income: admin.adminIncome||0, cogs: admin.adminCogs||0 };
+  return entry;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1817,6 +1737,21 @@ const PIMSY_HISTORY_MAX = 26;
 // Builds one director_pimsy_history entry from a parsed Klip month, mirroring Director Hub's
 // own snapshotPimsyHistory() entry shape exactly (date/period/partial/teamTotals) so Director
 // Hub's existing Trends charts read this hub's uploads with zero changes on that end.
+// Pimsy history clean-up (11/12/26, comptroller review). Drops entries whose team revenue is all
+// zero and multi-month range entries ("Dec 2025–Jan 2026"). Once a month has a complete entry, its
+// earlier partial (mid-month pace) entries are dropped, so a closed month appears once. Partial
+// pace points for the month still in progress are kept, as before. Runs on every Klip upload, so
+// the stored history cleans itself.
+function cleanPimsyHistory(list){
+  const isRange = p => /[a-z]{3,9}\.?\s*\d{4}\s*[\u2013\u2014-]\s*[a-z]{3,9}/i.test(String(p||''));
+  const allZero = e => { const t=e&&e.teamTotals||{}; const v=Object.values(t); return !v.length || v.every(x=>!(+x.revenue)); };
+  const kept = (list||[]).filter(e=>e && e.date && !isRange(e.period) && !allZero(e));
+  const completeByMonth = {};
+  kept.forEach(e=>{ if(!e.partial){ const mk=String(e.date).slice(0,7); if(!completeByMonth[mk] || String(e.date)>=String(completeByMonth[mk].date)) completeByMonth[mk]=e; } });
+  const out = kept.filter(e=>{ const c=completeByMonth[String(e.date).slice(0,7)]; return c ? e===c : true; });
+  out.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  return out;
+}
 function klipHistoryEntryFor(monthEntry){
   const date = (monthEntry && (monthEntry.periodEndDate || monthEntry.generated)) || new Date().toISOString().split('T')[0];
   const teamTotals = {};
@@ -1834,17 +1769,19 @@ function klipHistoryEntryFor(monthEntry){
   return { date: date, period: monthEntry && monthEntry.period, partial: !!(monthEntry && monthEntry.partial), teamTotals: teamTotals };
 }
 
-const CLINICAL_ROSTER = [
-  { fn:'Amanda',   ln:'Nelson'   },
-  { fn:'Lauren',   ln:'Breadon'  },
-  { fn:'Patricia', ln:'Graf'     },
-  { fn:'Katie',    ln:'Gassaway' },
-  { fn:'Muneera',  ln:'Novak'    },
-  { fn:'Kaitlynd', ln:'Donato'   },
-  { fn:'Danielle', ln:'Ricketts' },
-];
+// Clinical roster and targets come from the shared 'clinical_targets' row (11/12/26) — the
+// built-in list here had drifted (old targets were being written into director_clinweekly).
+// Refilled in place by applyClinicalTargets() when appdata loads.
+const CLINICAL_ROSTER = [];
 const clinNorm = n => n ? String(n).trim().replace(/\s+/g,' ').toLowerCase() : '';
-const CLINICAL_TARGETS = { 'Amanda Nelson':5827, 'Lauren Breadon':3663, 'Patricia Graf':3088, 'Katie Gassaway':2691, 'Muneera Novak':0, 'Kaitlynd Donato':7213, 'Danielle Ricketts':2691 };
+const CLINICAL_TARGETS = {};
+function applyClinicalTargets(obj){
+  if(!obj||typeof obj!=='object'||!Object.keys(obj).length) return;
+  Object.keys(CLINICAL_TARGETS).forEach(k=>delete CLINICAL_TARGETS[k]);
+  Object.assign(CLINICAL_TARGETS, obj);
+  CLINICAL_ROSTER.length=0;
+  Object.keys(obj).forEach(full=>{ const p=String(full).trim().split(/\s+/); CLINICAL_ROSTER.push({fn:p[0]||'', ln:p.slice(1).join(' ')}); });
+}
 // Pimsy/KLip billing data lists her under her legal first name rather than the name used in
 // the Clinical Team Dashboard's Monthly Goals sheet — same alias-resolution pattern as
 // SUP_NAME_ALIASES elsewhere, so the target still resolves regardless of which name a given
@@ -2357,12 +2294,8 @@ function catalogV(){
 }
 
 function initStaff(){
-  const def=SDEF.map(s=>({...s,status:s.status||'Active'}));
-  const saved=lv('s',null);
-  if(!saved)return def;
-  const savedIds=new Set(saved.map(s=>s.id));
-  const added=def.filter(s=>!savedIds.has(s.id));
-  return added.length?[...saved,...added]:saved;
+  // The roster comes from Supabase after sign-in; the browser copy is only a convenience.
+  return lv('s',[])||[];
 }
 
 // FIX (9/1): root cause of "a whole manager's team disappeared" reports that correlate with
@@ -2993,7 +2926,7 @@ function modH(){
     if(!s){body=`<div>Staff not found.</div>`;}
     else{
       const log=(S.noteLogs[s.id]||[]).slice().sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
-      const roleLbl=DIR[S.role]?.full||MGR[S.role]?.full||(S.role==='Brandon'?'Brandon Bailys (VP)':S.role);
+      const roleLbl=(DS_USER&&DS_USER.name)||DIR[S.role]?.full||MGR[S.role]?.full||S.role;
       const entries=log.length===0?`<div style="color:#8089a8;font-size:13px;font-style:italic;padding:14px;text-align:center;background:#faf6ee;border-radius:7px">No notes yet.</div>`:log.map(n=>{const dt=new Date(n.ts);const dlbl=isNaN(dt)?n.ts:dt.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'});return`<div style="background:#fff;border:1px solid #e6dfd2;border-left:3px solid #7C3AED;border-radius:6px;padding:9px 12px;margin-bottom:7px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px"><span style="font-size:11px;font-weight:700;color:#5B21B6">${xe(n.by||'—')}</span><div style="display:flex;align-items:center;gap:8px"><span style="font-size:10px;color:#8089a8;font-family:'IBM Plex Mono',monospace">${xe(dlbl)}</span><button onclick="H.delNote(${s.id},'${xe(n.ts)}')" style="background:#FEE2E2;color:#991B1B;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;font-family:inherit">✕</button></div></div><div style="font-size:13px;color:#1a2861;white-space:pre-wrap;line-height:1.45">${xe(n.text)}</div></div>`;}).join('');
       body=`<div style="font-weight:800;font-size:15px;color:#1a2861;margin-bottom:4px">💬 Notes — ${xe(s.fn)} ${xe(s.ln)}</div>
         <div style="font-size:12px;color:#6b7280;margin-bottom:14px">Manager: ${xe(MGR[s.mgr]?.full||s.mgr||'—')} · ID ${s.id}</div>
@@ -3266,14 +3199,14 @@ function modH(){
       <input type="file" accept=".xlsx,.xls" onchange="H.slotFilePL(this)" style="font-size:12px;font-family:inherit">
       ${M.prevPL?(M.prevPL.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevPL.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">OK</button></div></div>`:(()=>{
         const parsed = M.prevPL;
-        const months = (parsed.monthly && parsed.monthly.length) ? parsed.monthly : [{period:parsed.period, divisions:parsed.divisions, adminPool:parsed.adminPool, totalRev:parsed.totalRev}];
+        const months = (parsed.monthly && parsed.monthly.length) ? parsed.monthly : [{period:parsed.period, divisions:parsed.divisions, adminPool:parsed.adminPool, totalRev:parsed.totalRev, adminIncome:parsed.adminIncome, adminCogs:parsed.adminCogs, adminFound:parsed.adminFound}];
         const divRows = m => QB_DIVISION_TARGETS.map(t=>{
           const d = m.divisions[t.key];
           const gm = d.income ? ((d.income-d.cogs)/d.income*100) : 0;
           return `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${xe(t.name)}</span><span style="font-family:monospace">${fmt$(d.income)} <span style="color:#8089a8">(${gm.toFixed(0)}% GM)</span></span></div>`;
         }).join('');
         const monthBlocks = months.map(m=>`<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
-          <div style="font-weight:700;color:#1a2861;margin-bottom:4px">${xe(m.period||'(period not detected)')} <span style="font-weight:400;color:#8089a8">— Total Revenue ${fmt$(m.totalRev)} · Administrative overhead ${fmt$(m.adminPool)}</span></div>
+          <div style="font-weight:700;color:#1a2861;margin-bottom:4px">${xe(m.period||'(period not detected)')} <span style="font-weight:400;color:#8089a8">— Total Revenue ${fmt$(m.totalRev)} · Administrative overhead ${fmt$(m.adminPool)}${m.adminFound?` · Administrative income ${fmt$(m.adminIncome)} / COGS ${fmt$(m.adminCogs)}`:' · no Administrative column found'}</span></div>
           ${divRows(m)}
         </div>`).join('');
         return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
@@ -3281,7 +3214,7 @@ function modH(){
         <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks}</div>
         ${parsed.mismatchWarning?`<div style="font-size:11px;color:#92400E;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:8px 10px;margin-top:8px">⚠ ${xe(parsed.mismatchWarning)}</div>`:''}
         <div style="font-size:11px;color:#8089a8;margin-top:8px">This replaces (by period) any existing entry for the same month${months.length>1?'s':''} in Director Hub's financial history — a re-upload corrects that month rather than duplicating it. Director Hub decides which month becomes "current" on its own next load; this upload doesn't set that directly.</div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">Cancel</button><button class="btn-n" style="font-size:11px" onclick="H.commitPL()">Confirm Import</button></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">Cancel</button><button class="btn-g" style="font-size:11px" title="Adds only the Administrative class's income and COGS to months already on file. Division numbers are not changed." onclick="H.commitPL(true)">Add Administrative figures only</button><button class="btn-n" style="font-size:11px" onclick="H.commitPL()">Confirm Import</button></div>
       </div>`;
       })()):''}
     </div>
@@ -3413,17 +3346,12 @@ function renderHdr(){
   const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='catalog'?'Data Catalog':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
   const hSrc=periodForField('hours'),cSrc=periodForField('caseload');const allDates=[hSrc,cSrc].filter(Boolean).sort();const latest=allDates[allDates.length-1]||null;/* FIX (10/29/26): was ||S.period, which showed the hard-coded 2026-04-11 default as if it were real data */function fmt(d){if(!d)return'No data imported yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
   document.getElementById('hdr').innerHTML=`
-    <div class="ctx"><div class="where">${wherelabel}</div>${SYNC_STATE==='live'?'<span class="pill live" title="Roster and shared data loaded from Supabase on this visit">● Live</span>':SYNC_STATE==='stale'?'<span class="pill seed" title="Couldn\'t reach Supabase — showing the copy saved in this browser. Use Refresh Staffing Data on Staff &amp; Settings.">● Not live · cached copy</span>':'<span class="pill seed" title="Loading live data from Supabase…">○ Connecting…</span>'}</div>
+    <div class="ctx"><button class="menu-btn" onclick="toggleMobileNav()" aria-label="Menu">☰</button><div class="where">${wherelabel}</div>${SYNC_STATE==='live'?'<span class="pill live" title="Roster and shared data loaded from Supabase on this visit">● Live</span>':SYNC_STATE==='stale'?'<span class="pill seed" title="Couldn\'t reach Supabase — showing the copy saved in this browser. Use Refresh Staffing Data on Staff &amp; Settings.">● Not live · cached copy</span>':'<span class="pill seed" title="Loading live data from Supabase…">○ Connecting…</span>'}</div>
     <div class="meta" style="position:relative">
-      <div style="position:relative">
-        <button class="role-btn" onclick="event.stopPropagation();const m=document.getElementById('rm');m.style.display=m.style.display==='block'?'none':'block'">
-          <span class="dot-tag" style="background:${currentRole.color}"></span>
-          <div style="text-align:left"><div class="lbl">Viewing as</div><div class="val">${currentRole.label.split(' ')[0]} ▾</div></div>
-        </button>
-        <div id="rm" class="menu-dd" style="display:none;top:calc(100% + 6px);right:0;max-height:300px;overflow-y:auto">${rBtns}</div>
-      </div>
+      <!-- "Viewing as" picker removed 11/12/26: uploads and notes are now credited to the signed-in person (account menu). -->
       <span title="Most recent Hours/Caseload period on file" style="font-size:11px;color:${latest?'#cdd4f0':'#f5b8b8'};font-family:'IBM Plex Mono',monospace;display:inline-flex;align-items:center;gap:5px;white-space:nowrap"><span style="width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${latest?'#3cb43c':'#DC2626'}"></span>Data updated: ${fmt(latest)}</span>
       <button class="btn-t" onclick="H.om('data')">↑ Enter Data</button>
+      ${(window.ThriveAccount&&DS_USER)?ThriveAccount.chip():''}
     </div>`;
 }
 
@@ -8655,7 +8583,7 @@ async delSRow(enc){
   pmToggle(id,field){const seed=PROVIDER_MAP_DATA[id]||{};const cur={...seed,...(S.pmOverrides[id]||{})};const newVal=cur[field]==='Yes'?'No':'Yes';S.pmOverrides[id]={...(S.pmOverrides[id]||{}),[field]:newVal,_updatedAt:new Date().toISOString(),_updatedBy:S.role};sv('pmov',S.pmOverrides);renderV();},
   pmEditNote(id){const seed=PROVIDER_MAP_DATA[id]||{};const cur={...seed,...(S.pmOverrides[id]||{})};const newNote=prompt('Availability note:',cur.notes||'');if(newNote===null)return;S.pmOverrides[id]={...(S.pmOverrides[id]||{}),notes:newNote.trim(),_updatedAt:new Date().toISOString(),_updatedBy:S.role};sv('pmov',S.pmOverrides);renderV();},
   staffNote(id){M={type:'staffNote',staffId:id};modH();},
-  saveNote(id){const ta=document.getElementById('nNew');const text=ta?.value.trim();if(!text){alert('Please enter a note.');return;}const roleLbl=DIR[S.role]?.full||MGR[S.role]?.full||(S.role==='Brandon'?'Brandon Bailys (VP)':S.role);const entry={ts:new Date().toISOString(),by:roleLbl,text};S.noteLogs[id]=[entry,...(S.noteLogs[id]||[])];sv('nlogs',S.noteLogs);db.insert('notes',{staff_id:id,text,author:roleLbl});modH();const t=document.createElement('div');t.textContent='✓ Note saved';t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),1500);},
+  saveNote(id){const ta=document.getElementById('nNew');const text=ta?.value.trim();if(!text){alert('Please enter a note.');return;}const roleLbl=(DS_USER&&DS_USER.name)||DIR[S.role]?.full||MGR[S.role]?.full||S.role;const entry={ts:new Date().toISOString(),by:roleLbl,text};S.noteLogs[id]=[entry,...(S.noteLogs[id]||[])];sv('nlogs',S.noteLogs);db.insert('notes',{staff_id:id,text,author:roleLbl});modH();const t=document.createElement('div');t.textContent='✓ Note saved';t.style.cssText='position:fixed;top:20px;right:20px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';document.body.appendChild(t);setTimeout(()=>t.remove(),1500);},
   delNote(id,ts){if(!confirm('Delete this note?'))return;S.noteLogs[id]=(S.noteLogs[id]||[]).filter(n=>n.ts!==ts);if(S.noteLogs[id].length===0)delete S.noteLogs[id];sv('nlogs',S.noteLogs);modH();},
   hf(inp){M.tab='hours';M.slotId='productivity';if(inp.files[0])this.rf(inp.files[0]);},
   recomputeCR(){ recomputeCommunityFromRaw(); },
@@ -8866,9 +8794,10 @@ async delSRow(enc){
   // in this hub's simple appdata-blob pattern does — but that's a pre-existing, much rarer risk
   // shared by every upload in this file, not something new introduced here.
   _plCommitChain: Promise.resolve(),
-  commitPL(){
+  commitPL(adminOnly){
     if(!M.prevPL || M.prevPL.error) return;
     const parsed = M.prevPL;
+    parsed._adminOnly = !!adminOnly;
     M.prevPL = null; // clear immediately so this exact upload can't be double-submitted by a second click
     render();
     H._plCommitChain = H._plCommitChain.then(()=>H._commitPLNow(parsed)).catch(err=>{
@@ -8879,8 +8808,8 @@ async delSRow(enc){
   },
   async _commitPLNow(parsed){
     const newEntries = (parsed.monthly && parsed.monthly.length)
-      ? parsed.monthly.map(m=>plHistoryEntryFor(m.period, m.divisions, m.adminPool, m.totalRev))
-      : [plHistoryEntryFor(parsed.period, parsed.divisions, parsed.adminPool, parsed.totalRev)];
+      ? parsed.monthly.map(m=>plHistoryEntryFor(m.period, m.divisions, m.adminPool, m.totalRev, m))
+      : [plHistoryEntryFor(parsed.period, parsed.divisions, parsed.adminPool, parsed.totalRev, parsed)];
 
     let existing = [];
     try{
@@ -8896,6 +8825,27 @@ async delSRow(enc){
     // Same replace-by-period merge Director Hub's own snapshotFinancialHistoryFor() uses — a
     // re-upload of a month already on file corrects that entry instead of duplicating it. New
     // entries are concatenated AFTER existing ones so they win the by-period dedup below.
+    // "Administrative figures only" (11/12/26): adds adminClass to months already on file and
+    // changes nothing else, so earlier months' division numbers (e.g. the reinstated Linkage
+    // reclass in Jan–Jun) stay exactly as they are.
+    if(parsed._adminOnly){
+      // Match months by month + year, so "Oct 2026" and "October 2026" are the same month.
+      const mkey = lbl => { const m=String(lbl||'').trim().match(/^([a-z]{3})[a-z]*\.?\s+(\d{4})$/i); return m ? m[1].toLowerCase()+' '+m[2] : String(lbl||'').trim().toLowerCase(); };
+      const fresh = {}; const freshLabel = {};
+      newEntries.forEach(en=>{ if(en.adminClass){ fresh[mkey(en.period)]=en.adminClass; freshLabel[mkey(en.period)]=en.period; } });
+      let added = 0; const missing = [];
+      existing.forEach(en=>{ const k=mkey(en.period); if(fresh[k]){ en.adminClass = fresh[k]; added++; } });
+      Object.keys(fresh).forEach(k=>{ if(!existing.some(en=>mkey(en.period)===k)) missing.push(freshLabel[k]); });
+      if(!added){ showSaveError('No months in this file match months already on file, so nothing was added. Use Confirm Import for new months.'); return; }
+      const ok = await db.upsert('appdata', {key:'director_financial_history', value: JSON.stringify(existing)}, 'key');
+      if(!ok){ showSaveError('Save failed — the Administrative figures were not saved. Try again.'); return; }
+      render();
+      const t=document.createElement('div');
+      t.textContent=`✓ Added Administrative figures to ${added} month${added!==1?'s':''}${missing.length?` · skipped ${missing.join(', ')} (not on file yet)`:''} — division numbers unchanged. Open Director Hub to refresh the SLG Hub.`;
+      t.style.cssText='position:fixed;top:20px;right:20px;max-width:440px;background:#1B5E20;color:#fff;padding:8px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.2)';
+      document.body.appendChild(t); setTimeout(()=>t.remove(),7000);
+      return;
+    }
     const byPeriod = {};
     existing.concat(newEntries).forEach(en=>{ byPeriod[en.period] = en; });
     let merged = Object.keys(byPeriod).map(k=>byPeriod[k]);
@@ -8988,8 +8938,7 @@ async delSRow(enc){
     }catch(err){ console.warn('[commitKlip] could not read existing director_pimsy_history', err); }
     const byDate = {};
     existingHistory.concat(newEntries).forEach(en=>{ byDate[en.date] = en; }); // new entries win on an exact-date collision, same as snapshotPimsyHistory's own dedup
-    let mergedHistory = Object.keys(byDate).map(k=>byDate[k]);
-    mergedHistory.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    let mergedHistory = cleanPimsyHistory(Object.keys(byDate).map(k=>byDate[k]));
     mergedHistory = mergedHistory.slice(-PIMSY_HISTORY_MAX);
 
     // Promotion to the "live" snapshot Director Hub reads for its KPI tiles/goal tracker —
@@ -10284,24 +10233,35 @@ document.addEventListener('click',e=>{const rm=document.getElementById('rm');if(
 // then the reviewers row for the signed-in user; any reviewer may use the hub. Nothing is loaded
 // from Supabase until this passes, and then syncFromSupabase() runs with the signed-in token.
 // A remembered editUnlocked=true is still re-checked against EDIT_ALLOWLIST (was dsAuthInit).
-const DS_LOGO="data:image/png;base64,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";
 let DS_USER=null;
-_dsTry(()=>{ document.getElementById('dsLoginLogo').src=DS_LOGO; });
 function dsLoginErr(msg){ const el=document.getElementById('dsLoginError'); if(!el)return; el.textContent=msg||''; el.style.display=msg?'block':'none'; }
+// Phone navigation drawer (added 11/12/26).
+function toggleMobileNav(){
+  const opening=!document.getElementById('sidebar').classList.contains('open');
+  document.getElementById('sidebar').classList.toggle('open',opening);
+  document.getElementById('navBackdrop').classList.toggle('open',opening);
+}
+function closeMobileNav(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('navBackdrop').classList.remove('open');
+}
+document.addEventListener('click',e=>{ if(e.target.closest&&e.target.closest('#sidebar .nav-item')) closeMobileNav(); });
 function dsShowGate(){
   const g=document.getElementById('dsLoginScreen'); if(g) g.style.display='flex';
   document.getElementById('dsLoginChecking').style.display='none';
   document.getElementById('dsLoginForm').style.display='block';
-  document.getElementById('dsSignOutBtn').style.display='none';
   setTimeout(()=>{ const e=document.getElementById('dsLoginEmail'); if(e) e.focus(); },50);
 }
 function dsHideGate(){
   document.getElementById('dsLoginScreen').style.display='none';
-  const b=document.getElementById('dsSignOutBtn');
-  b.textContent='Signed in as '+((DS_USER&&(DS_USER.name||DS_USER.email))||'—')+' · Sign Out';
-  b.style.display='block';
+  // Account menu (shared/thrive-account-menu.js) in the top bar, same as every other hub (11/12/26).
+  if(window.ThriveAccount) ThriveAccount.init({ client: dsSb, name: DS_USER&&DS_USER.name, email: DS_USER&&DS_USER.email, onSignOut: dsSignOut });
 }
 function dsRelock(){ if(S.editUnlocked){ S.editUnlocked=false; S.editUser=null; sv('editUnlocked',false); sv('editUser',null); } }
+// Who can open this hub (Brandon, 10/29/26; enforced 11/12/26 — the check was described in
+// SETUP.md but missing from the code, so any reviewer could sign in). Add a role here to widen it.
+const DS_VIEW_ROLES=['org_wide'];
+function dsCanView(r){ return !!r && DS_VIEW_ROLES.includes(String(r.role||'').trim().toLowerCase()); }
 async function dsLookupReviewer(userId){
   try{
     const {data,error}=await dsSb.from('reviewers').select('name,role,email').eq('id',userId).single();
@@ -10337,30 +10297,31 @@ async function dsHandleLogin(){
     try{ await dsSb.auth.signOut(); }catch(e){}
     reset(); return;
   }
+  if(!dsCanView(reviewer)){
+    dsLoginErr('Signed in as '+(reviewer.name||email)+', but Data & Staff Hub is limited to org-wide leadership accounts. Contact Brandon if you need access.');
+    try{ await dsSb.auth.signOut(); }catch(e){}
+    reset(); return;
+  }
   document.getElementById('dsLoginPassword').value='';
   reset();
   await dsAfterSignIn(reviewer);
 }
 async function dsSignOut(){
+  dsRelock();
   try{ await dsSb.auth.signOut(); }catch(e){}
-  DS_USER=null; dsRelock();
-  const e=document.getElementById('dsLoginEmail'), p=document.getElementById('dsLoginPassword');
-  if(e) e.value=''; if(p) p.value='';
-  dsLoginErr('');
-  dsShowGate();
+  location.reload(); // clears everything that was on screen
 }
 (async function dsGateInit(){
   let session=null;
   try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
   if(session){
     const reviewer=await dsLookupReviewer(session.user.id);
-    if(reviewer){ await dsAfterSignIn(reviewer); return; }
+    if(reviewer && dsCanView(reviewer)){ await dsAfterSignIn(reviewer); return; }
   }
   dsRelock();
   dsShowGate();
 })();
-
-render();
+// render() runs only after sign-in now (dsAfterSignIn), so nothing is drawn behind the sign-in card.
 </script>
 </body>
 </html>
