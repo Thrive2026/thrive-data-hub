@@ -1,6 +1,6 @@
 # Thrive Data & Staff Hub
 
-*Updated 11/9/26.*
+*Updated 11/12/26.*
 
 A single-file app (`index.html`) that holds the shared staff roster and the central data uploads for the Thrive Tools ecosystem. It runs as a static site on Render and redeploys automatically from this repo's `main` branch.
 
@@ -45,7 +45,8 @@ Each post-cutover month in `linkage_history` also gets `nonBk.converted` and `no
 
 ## Who can do what
 
-- **Viewing:** the whole page requires sign-in (added 10/29/26). Only org-wide reviewers (`reviewers.role = org_wide`) can get in (Brandon, 10/29/26; change `DS_VIEW_ROLES` in `index.html` to widen it). Nothing loads from Supabase until then. The sign-in is held in memory, so it lasts for that page visit only, and reloading asks again.
+- **Viewing:** the whole page requires sign-in (added 10/29/26). Only org-wide reviewers (`reviewers.role = org_wide`) can get in (Brandon, 10/29/26; change `DS_VIEW_ROLES` in `index.html` to widen it). Until 11/12/26 the code didn't actually check the role, so any reviewer could sign in; it does now. Nothing loads or is drawn on screen until sign-in passes.
+- **Account menu:** the signed-in person's name is in the top bar ("Signed in as ▾") with Change password and Sign out, as in every hub. Signing out reloads the page. The old "Viewing as" picker is gone: uploads and staff notes are credited to the signed-in person.
 - **Editing the roster:** after signing in, click **Unlock Roster Editing**. It checks the signed-in account against `EDIT_ALLOWLIST` in `index.html` (Brandon, Avril, Sarah Neff). No second password is needed.
 - **Data requests** use the signed-in person's own login rather than the public key, so the hub is ready for the appdata lockdown.
 - **Crisis Center staff** are view-only here. Their records are edited in the Crisis Center hub (decision 9/23/26).
@@ -96,9 +97,21 @@ The **Late Notes 2026 workbook** isn't needed anymore. Its upload box has been r
 
 The top of **Enter Data** is now a checklist of every file that still has to be uploaded by hand. Each row shows how often it's due, when it was last uploaded and by whom, how far the data goes, a Fresh / Due / Overdue / Never uploaded badge, where to get the file, and which hubs it feeds. Overdue files are listed first. **Upload ↓** jumps to that file's upload box. Below the list is a section of what's now automatic and no longer needs an upload. Status comes from the same import registry as the Data Catalog tab, so the two always agree. To add or change a row, edit `UPLOAD_CHECKLIST` in `index.html`. Renewals is now due weekly instead of every two weeks, because caseload for engagement % depends on it. TripLog and JotForm mileage aren't on the checklist yet because their uploads don't record when they were last done.
 
+## Calibration (11/12/26)
+
+**Before deploying:** make sure the one-time **Roster Backfill** from the thrive-hub update (11/11/26) has been run. This file no longer has a built-in staff list (`SDEF`) or built-in gender/location/availability list (`PROVIDER_MAP_DATA`); those fields now come only from each staff record and `pm_overrides`.
+
+- **Administrative class figures.** The P&L upload now also saves the Administrative class's own income and COGS with each month (`adminClass` in `director_financial_history`). Director Hub adds them up and passes them to the SLG Hub, whose company-wide net and gross margin need them. If a file has no Administrative column, nothing is saved for it (never $0).
+  - **Add Administrative figures only** (button on the P&L preview): adds just those two numbers to months already on file and changes nothing else. Use it once with a Jan–Oct 2026 P&L by Class export to fill in past months without touching their division numbers (for example, Linkage's Jan–Jun figures, which include the reinstated reclass).
+- **Pimsy history clean-up.** Each Klip upload now cleans `director_pimsy_history`: it drops entries whose team revenue is all zero, drops multi-month range entries, and once a month has a complete entry it drops that month's earlier partial ones. The clean-up runs on the next Klip upload.
+- **Clinical roster and targets** for Clinical Goals come from the shared `clinical_targets` row. The built-in list here had old targets that were being saved into `director_clinweekly`.
+- **Browser storage.** Only the staff roster, productivity numbers, upload freshness, supervision checkmarks and view choices are kept in the browser. Renewals, tasks, staff notes, hospital outcomes and Linkage data stay in memory only, and copies saved by older versions are deleted on load.
+- **Look and feel:** standard sign-in card, account menu, and a ☰ menu on phones (the sidebar used to disappear on phones with no way to open it).
+- **Still built in (follow-up):** the `MGR`/`DIR` manager and director list (names and emails, used to label teams), `EDIT_ALLOWLIST`, and `MANAGER_STAFF` inside the Klip parser. `MANAGER_STAFF` is the fallback for attributing former staff's billing. Before removing it, confirm every former staff member is still on the roster as Inactive.
+
 ## Gotchas
 
-- Redeploying with new people added to `SDEF` only adds new IDs to the live roster. It never overwrites someone who's already there. To correct an existing person, edit them in the app, or use a one-off migration script for bulk fixes.
+- The roster comes only from the shared `staff` key. To add or correct someone, edit them in the app, or use a one-off migration script for bulk fixes.
 - Name matching for imports goes through `normAliasName()` and the Supabase `staff_aliases` table. Bracketed notes such as "(HOLD)" are stripped automatically. A true nickname mismatch needs a `staff_aliases` entry.
 - If the Linkage Hub shows "—" for Transitioned after an upload, the file was probably missing the clinical notes. Check that it was the org-wide export.
 - `linkage_notes_raw` holds every org-wide note row (client #, insurance, provider) and grows each month. It's kept out of the browser's local storage on purpose. Other pages shouldn't load all of `appdata` at once (Community Hub and Provider Match now skip or exclude it). Any new page should request only the keys it needs.
@@ -108,6 +121,7 @@ The top of **Enter Data** is now a checklist of every file that still has to be 
 - The `thrive-hub` landing page (Data & Staff Hub tile)
 - The Director Hub
 - The BH Linkage Hub (Optum referral upload link)
+
 
 
 
