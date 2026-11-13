@@ -1324,6 +1324,839 @@ function plHistoryEntryFor(period, divisionsIn, adminPool, totalRev, admin){
   return entry;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// MONTHLY FINANCIALS — Comptroller-approved rules (Round 2, 11/13/26)
+// Pure functions: file rows in, plain objects out. No Supabase, no DOM.
+// Rules: claude/hub-financials-comptroller-decisions-2026-11-13 (project notes) / Hub Rebuild Build Spec.
+//   1. Base = monthly P&L by Class (revenue, COGS, direct expenses, Administrative pool).
+//   2. On top: Eric's adjustment rows from his P&L by Contract — revenue moved from Community
+//      (incl. NACCHO −$60K), 75% BB wages, HI reclass, ER-tax reclass, software. Its own revenue
+//      and COGS figures are not used.
+//   3. Hospitals Admin sub-class COGS removed from Hospitals (goes to the Administrative pool).
+//   5. CareSource bonus ("Hospital Income" in Linkage) split across Community / Linkage / Clinical
+//      by that month's services income by class.
+//   6. One-time items (e.g. Oct $28,561 Workers Comp/COVID refund) excluded from revenue.
+//   7. Overhead = remaining Administrative COGS + Administrative expenses, spread by share of
+//      division revenue (denominator = division revenue only).
+//   8. Offsets: HI and software out of Admin COGS; removed BB wages into Admin COGS; ER-tax
+//      reclass offset in the Admin expense pool.
+// A block of adjustments that covers several months (Eric's Jan–Aug tab) is applied to the
+// LAST month of the block, so YTD is exact; months before it carry Class figures only.
+// ══════════════════════════════════════════════════════════════════════════════
+const FIN_DIVS = [
+  {key:'community',   name:'Community',        cls:'Community',        contract:'Community'},
+  {key:'hospitals',   name:'Hospitals',        cls:'Hospitals',        contract:'Hospitals'},
+  {key:'linkage',     name:'Linkage',          cls:'Linkage',          contract:'Linkage'},
+  {key:'clinical',    name:'Clinical',         cls:'Clinical',         contract:'Clinical'},
+  {key:'justice',     name:'Justice Involved', cls:'Justice Involved', contract:'Justice Involved'},
+  {key:'callcenters', name:'Call Centers',     cls:'Call Centers',     contract:'Call Centers'},
+  {key:'other',       name:'Other (Grants)',   cls:'Other',            contract:'Other'},
+];
+const FIN_CARESOURCE_SPLIT = ['community','linkage','clinical'];
+const FIN_CALL_CENTER_MONTHLY = 24888.83;      // 1/12 of the Cuyahoga Warmline award (rule 10)
+const FIN_GM_TARGET = 0.25, FIN_NM_TARGET = 0.15; // leadership goals; Clinical GM target 0%
+const FIN_SWING_POINTS = 10;                      // flag margin moves larger than this vs prior month
+const FIN_ONE_TIME_RE = /refund|settlement|insurance proceeds|retention credit|\bERC\b|gain on (sale|disposal)/i;
+const FIN_ONE_TIME_MIN = 5000;                    // suggested one-time flag threshold; uploader can change it per line
+const FIN_MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+// Jan–Oct 2026 baseline the Comptroller approved on Nov 13 (Final Numbers tab).
+const FIN_BASELINE = {
+  approver:'Eric Saunier', approvedOn:'2026-11-13', throughYm:'2026-10', companyNet:-358305,
+  note:'Jan–Oct 2026 baseline approved by the Comptroller on Nov 13, 2026 (Hub Financials Comptroller Review, Final Numbers tab).',
+  rows:{
+    community:  {income:3651054, cogs:2777449, directExp:66174, alloc:1162884, gm:23.9, nm:-9.7,  net:-355453},
+    hospitals:  {income:1150174, cogs:482071,  directExp:19888, alloc:366338,  gm:58.1, nm:24.5,  net:281878},
+    linkage:    {income:357500,  cogs:337158,  directExp:9285,  alloc:113866,  gm:5.7,  nm:-28.8, net:-102810},
+    clinical:   {income:181284,  cogs:267805,  directExp:9533,  alloc:57740,   gm:-47.7,nm:-84.8, net:-153794},
+    justice:    {income:606861,  cogs:375594,  directExp:15719, alloc:193289,  gm:38.1, nm:3.7,   net:22258},
+    callcenters:{income:248888,  cogs:256063,  directExp:5966,  alloc:79272,   gm:-2.9, nm:-37.1, net:-92413},
+    other:      {income:1006303, cogs:619008,  directExp:30115, alloc:320514,  gm:38.5, nm:3.6,   net:36667},
+  },
+};
+
+function finTxt(v){ return String(v==null?'':v).replace(/\s+/g,' ').trim(); }
+function finNum(v){
+  if(v==null||v==='') return 0;
+  if(typeof v==='number') return isFinite(v)?v:0;
+  const s=String(v).replace(/[,$\s]/g,''); const neg=/^\(.*\)$/.test(s);
+  const n=parseFloat(s.replace(/[()]/g,'')); return isNaN(n)?0:(neg?-n:n);
+}
+function finYm(y,m){ return y+'-'+String(m).padStart(2,'0'); }
+function finYmLabel(ym){ const [y,m]=ym.split('-').map(Number); return FIN_MONTHS[m-1].replace(/^./,c=>c.toUpperCase())+' '+y; }
+function finYmShort(ym){ return finYmLabel(ym).slice(0,3)+' '+ym.slice(0,4); }
+function finNextYm(ym){ let [y,m]=ym.split('-').map(Number); m++; if(m>12){m=1;y++;} return finYm(y,m); }
+function finMonthIdx(word){ const w=String(word||'').toLowerCase().replace(/\.$/,''); return FIN_MONTHS.findIndex(m=>m===w||(w.length>=3&&m.startsWith(w))); }
+function finRangeLabel(yms){
+  if(!yms.length) return '';
+  if(yms.length===1) return finYmLabel(yms[0]);
+  const a=finYmLabel(yms[0]), b=finYmLabel(yms[yms.length-1]);
+  return a.slice(0,a.lastIndexOf(' '))+'–'+b;
+}
+function finPeriodKey(yms){ return yms.length===1 ? yms[0] : yms[0]+'..'+yms[yms.length-1]; }
+
+// ── P&L by Class (one month per file) ─────────────────────────────────────────
+function finParseClassPL(rows, fileName){
+  const where = fileName ? ` (${fileName})` : '';
+  let hr=-1;
+  for(let r=0;r<Math.min(rows.length,25);r++){
+    const t=(rows[r]||[]).map(finTxt);
+    if(t.includes('Community') && t.includes('Linkage') && t.includes('Total')){ hr=r; break; }
+  }
+  if(hr<0) throw new Error(`Couldn't find the class header row${where}. Is this QuickBooks' "Profit and Loss by Class" report?`);
+  let ym=null, title='';
+  for(let r=0;r<hr;r++){
+    const v=finTxt((rows[r]||[])[0]);
+    if(/profit and loss/i.test(v)) title=v;
+    const range=v.match(/^([A-Za-z]+)\.?(?:\s*[-–]\s*|\s+(?:thru|through|to)\s+)([A-Za-z]+)\.?,?\s+(\d{4})$/i);
+    if(range) throw new Error(`${fileName||'This file'} covers ${v}. Export one month per file (Report period: a single month).`);
+    const m=v.match(/^([A-Za-z]+)\.?,?\s+(\d{4})$/);
+    if(m && finMonthIdx(m[1])>=0){ ym=finYm(+m[2], finMonthIdx(m[1])+1); }
+  }
+  if(!ym) throw new Error(`Couldn't find the report month${where} (expected a line such as "October 2026" above the column headers).`);
+  const hdr=(rows[hr]||[]).map(finTxt);
+  // Columns: a class with sub-classes has "X", its sub-columns, then "Total for X".
+  const classes={};
+  const totalsAt={}; hdr.forEach((h,i)=>{ if(/^Total for /.test(h)) totalsAt[h.slice(10)]=i; });
+  for(let i=1;i<hdr.length;i++){
+    const h=hdr[i]; if(!h || h==='Total' || /^Total for /.test(h)) continue;
+    if(totalsAt[h]!=null && totalsAt[h]>i){
+      const subs={}; for(let j=i+1;j<totalsAt[h];j++) if(hdr[j]) subs[hdr[j]]=j;
+      classes[h]={col:totalsAt[h], subs}; i=totalsAt[h];
+    } else if(!(h in classes)) classes[h]={col:i, subs:{}};
+  }
+  const totalCol=hdr.lastIndexOf('Total');
+  const need=['Administrative', ...FIN_DIVS.map(d=>d.cls)];
+  const missing=need.filter(c=>!classes[c]);
+  if(missing.length) throw new Error(`${fileName||'This file'} is missing class column(s): ${missing.join(', ')}.`);
+  const unknown=Object.keys(classes).filter(c=>!need.includes(c));
+  if(unknown.length) throw new Error(`${fileName||'This file'} has class column(s) the rules don't cover: ${unknown.join(', ')}. Ask the Comptroller which division they belong to before uploading.`);
+  const label=r=>finTxt((rows[r]||[])[0]);
+  const findRow=(labels,{from=hr+1,to=rows.length,last=false}={})=>{ let f=-1; for(let r=from;r<to;r++){ if(labels.includes(label(r))){ f=r; if(!last) break; } } return f; };
+  const R={
+    income: findRow(['Total Income','Total for Income']),
+    cogs:   findRow(['Total Cost of Goods Sold','Total for Cost of Goods Sold'],{last:true}),
+    exp:    findRow(['Total Expenses','Total for Expenses']),
+    pers:   findRow(['Total for Personnel','Total Personnel']),
+    noi:    findRow(['Net Operating Income']),
+    svc:    findRow(['Total for Services Income','Total Services Income']),
+  };
+  const req={income:'Total Income',cogs:'Total Cost of Goods Sold',exp:'Total Expenses',pers:'Total for Personnel',noi:'Net Operating Income'};
+  const miss=Object.keys(req).filter(k=>R[k]<0);
+  if(miss.length) throw new Error(`${fileName||'This file'}: couldn't find row(s) ${miss.map(k=>'"'+req[k]+'"').join(', ')}.`);
+  R.hosp=findRow(['Hospital Income'],{to:R.income});
+  const cell=(r,c)=> (r<0||c<0) ? 0 : finNum((rows[r]||[])[c]);
+  const byClass={};
+  Object.entries(classes).forEach(([cls,{col,subs}])=>{
+    byClass[cls]={ income:cell(R.income,col), cogs:cell(R.cogs,col), exp:cell(R.exp,col), personnel:cell(R.pers,col),
+                   noi:cell(R.noi,col), services:cell(R.svc,col), hospitalIncome:cell(R.hosp,col) };
+    if(cls==='Hospitals'){
+      const a=subs['Admin'];
+      byClass[cls].adminSubCogs = a!=null ? cell(R.cogs,a) : 0;
+      byClass[cls].adminSubPersonnel = a!=null ? cell(R.pers,a) : 0;
+      byClass[cls].adminSubFound = a!=null;
+    }
+  });
+  // Miscellaneous income lines → one-time candidates (rule 6).
+  const misc=[];
+  const ms=findRow(['Miscellaneous Income'],{to:R.income}), me=findRow(['Total for Miscellaneous Income','Total Miscellaneous Income'],{to:R.income});
+  const scanFrom = ms>=0 ? ms+1 : hr+1, scanTo = (ms>=0&&me>ms) ? me : R.income;
+  for(let r=scanFrom;r<scanTo;r++){
+    const name=label(r); if(!name || /^Total/.test(name)) continue;
+    if(ms<0 && !FIN_ONE_TIME_RE.test(name)) continue; // no Misc section: only refund-like lines
+    const amounts={}; let any=false;
+    Object.entries(classes).forEach(([cls,{col}])=>{ const v=cell(r,col); if(v){ amounts[cls]=v; any=true; } });
+    if(!any) continue;
+    const total=totalCol>=0?cell(r,totalCol):Object.values(amounts).reduce((s,v)=>s+v,0);
+    misc.push({name, amounts, total, suggested: FIN_ONE_TIME_RE.test(name) && Math.abs(total)>=FIN_ONE_TIME_MIN});
+  }
+  const fileTotal={ income:cell(R.income,totalCol), cogs:cell(R.cogs,totalCol), exp:cell(R.exp,totalCol), noi:cell(R.noi,totalCol) };
+  return { ym, label:finYmLabel(ym), title, fileName:fileName||null, byClass, misc, fileTotal,
+           hospitalsAdminFound: !!byClass.Hospitals.adminSubFound };
+}
+
+// ── P&L by Contract: read only the Comptroller's adjustment rows ──────────────
+const FIN_ADJ_KEYS = { rev:['fromcommunity'], bb:['bbwages'], hi:['hireclass'], er:['ertaxesreclass','ertaxreclass'], sw:['software'] };
+const FIN_ADJ_LABELS = { rev:'Revenue moved from Community (incl. NACCHO)', bb:'75% BB wages', hi:'HI reclass', er:'ER taxes reclass', sw:'Software' };
+function finNorm(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9%]/g,''); }
+function finParseContractTitle(t){
+  const s=finTxt(t).replace(/^test(\s+data)?\s*[-—–:]*\s*/i,'');
+  let m=s.match(/^([A-Za-z]+)\.?(?:\s*[-–]\s*|\s+(?:thru|through|to)\s+)([A-Za-z]+)\.?,?\s+(\d{4})\b/i);
+  if(m && finMonthIdx(m[1])>=0 && finMonthIdx(m[2])>=0){
+    const y=+m[3], a=finMonthIdx(m[1])+1, b=finMonthIdx(m[2])+1; if(b<a) return null;
+    const out=[]; for(let k=a;k<=b;k++) out.push(finYm(y,k)); return out;
+  }
+  m=s.match(/^([A-Za-z]+)\.?,?\s+(\d{4})\b/);
+  if(m && finMonthIdx(m[1])>=0) return [finYm(+m[2], finMonthIdx(m[1])+1)];
+  return null;
+}
+function finParseContractSheet(rows, sheetName, fileName){
+  let title=null, titleRow=-1;
+  for(let r=0;r<Math.min(rows.length,8)&&!title;r++) (rows[r]||[]).forEach(v=>{ if(!title && /p\s*&\s*l by contract/i.test(finTxt(v))){ title=finTxt(v); titleRow=r; } });
+  if(!title) return null;
+  const months=finParseContractTitle(title.replace(/\s*p\s*&\s*l by contract.*$/i,''));
+  if(!months) throw new Error(`${fileName}, tab "${sheetName}": couldn't read the period from "${title}".`);
+  let nameRow=-1;
+  for(let r=titleRow+1;r<Math.min(rows.length,titleRow+15);r++){
+    const t=(rows[r]||[]).map(finTxt);
+    if(t.includes('Community') && t.includes('Clinical') && t.includes('Linkage')){ nameRow=r; break; }
+  }
+  if(nameRow<0) throw new Error(`${fileName}, tab "${sheetName}": couldn't find the contract name row.`);
+  let groupRow=-1;
+  for(let r=nameRow-1;r>titleRow;r--){ const t=(rows[r]||[]).map(finTxt); if(t.includes('Hospitals')||t.includes('Justice Involved')){ groupRow=r; break; } }
+  if(groupRow<0) throw new Error(`${fileName}, tab "${sheetName}": couldn't find the division group row (Call Centers / Hospitals / Justice Involved / Other).`);
+  const groupAt={}; (rows[groupRow]||[]).forEach((v,c)=>{ const t=finTxt(v); if(t) groupAt[c]=t; });
+  const cols=[]; let cur=null;
+  const names=rows[nameRow]||[];
+  for(let c=0;c<names.length;c++){
+    if(groupAt[c]) cur=groupAt[c];
+    const n=finTxt(names[c]); if(!n || /^totals?$/i.test(n)) continue;
+    const own=FIN_DIVS.find(d=>d.contract===n && FIN_CARESOURCE_SPLIT.includes(d.key));
+    const grp=own ? own : FIN_DIVS.find(d=>d.contract===cur);
+    if(!grp) throw new Error(`${fileName}, tab "${sheetName}": contract "${n}" sits under "${cur||'no group'}", which isn't one of the seven divisions.`);
+    cols.push({c, contract:n, div:grp.key});
+  }
+  const adj={}, byContract={}, found={};
+  Object.keys(FIN_ADJ_KEYS).forEach(k=>{ adj[k]={}; byContract[k]={}; });
+  for(let r=nameRow+1;r<Math.min(rows.length,nameRow+40);r++){
+    const lab=[0,1,2].map(i=>finTxt((rows[r]||[])[i])).find(Boolean)||'';
+    const nl=finNorm(lab);
+    if(!/^ad/.test(nl)) continue; // "Adjustments (…)" — also tolerates the "AdKustments" typo
+    const k=Object.keys(FIN_ADJ_KEYS).find(key=>FIN_ADJ_KEYS[key].some(p=>nl.includes(p)));
+    if(!k || found[k]) continue;
+    found[k]=lab;
+    cols.forEach(({c,contract,div})=>{ const v=finNum((rows[r]||[])[c]); if(v){ adj[k][div]=(adj[k][div]||0)+v; byContract[k][contract]=(byContract[k][contract]||0)+v; } });
+  }
+  const missing=Object.keys(FIN_ADJ_KEYS).filter(k=>!found[k]);
+  if(missing.length) throw new Error(`${fileName}, tab "${sheetName}": missing adjustment row(s): ${missing.map(k=>FIN_ADJ_LABELS[k]).join(', ')}.`);
+  const totals={}; Object.keys(adj).forEach(k=>totals[k]=Object.values(adj[k]).reduce((s,v)=>s+v,0));
+  const naccho=Object.entries(byContract.rev).filter(([n])=>/naccho/i.test(n)).reduce((s,[,v])=>s+v,0);
+  return { sheet:sheetName, fileName, title, months, key:finPeriodKey(months), label:finRangeLabel(months), adj, byContract, totals, naccho, rowLabels:found };
+}
+function finParseContractWorkbook(sheets, fileName){
+  const tabs=[];
+  Object.entries(sheets).forEach(([name,rows])=>{ const t=finParseContractSheet(rows,name,fileName); if(t) tabs.push(t); });
+  if(!tabs.length) throw new Error(`${fileName}: no "P&L by Contract" tab found.`);
+  return tabs;
+}
+
+// ── Pair class months with adjustment tabs → one submission per period ────────
+function finPlanSubmissions(classMonths, contractTabs){
+  const warnings=[];
+  const byYm={}; classMonths.forEach(m=>{ if(byYm[m.ym]) throw new Error(`${m.label} was uploaded twice (${byYm[m.ym].fileName} and ${m.fileName}).`); byYm[m.ym]=m; });
+  const tabs={};
+  contractTabs.forEach(t=>{
+    const prev=tabs[t.key];
+    if(prev){
+      const diff=Object.keys(t.totals).some(k=>Math.abs(t.totals[k]-prev.totals[k])>0.5);
+      if(diff) warnings.push(`Two P&L by Contract files have different ${t.label} adjustments (${prev.fileName} vs ${t.fileName}). Using ${t.fileName}.`);
+    }
+    tabs[t.key]=t; // later files win
+  });
+  const yms=Object.keys(byYm).sort(); const used=new Set(); const groups=[];
+  let i=0;
+  while(i<yms.length){
+    const start=yms[i];
+    const cands=Object.values(tabs).filter(t=>t.months[0]===start && t.months.every(m=>byYm[m]));
+    if(!cands.length){
+      const partial=Object.values(tabs).find(t=>t.months.includes(start));
+      throw new Error(partial
+        ? `${finYmLabel(start)}: the Comptroller's adjustments for it come as one block (${partial.label}). Upload the P&L by Class for every month in that block together.`
+        : `No P&L by Contract tab covers ${finYmLabel(start)}. Add the Comptroller's P&L by Contract for that month.`);
+    }
+    cands.sort((a,b)=>b.months.length-a.months.length);
+    const t=cands[0]; used.add(t.key);
+    groups.push({ months:t.months.map(m=>byYm[m]), tab:t, periodKey:t.key, label:t.label });
+    i+=t.months.length;
+  }
+  const unused=Object.values(tabs).filter(t=>!used.has(t.key)).map(t=>t.label);
+  return { groups, warnings, unusedTabs:unused };
+}
+
+// ── Calculation ──────────────────────────────────────────────────────────────
+function finAllocate(divs, pool){
+  const R=FIN_DIVS.reduce((s,d)=>s+divs[d.key].income,0);
+  FIN_DIVS.forEach(d=>{
+    const x=divs[d.key];
+    x.allocOH = R ? pool*x.income/R : 0;
+    x.grossProfit = x.income-x.cogs;
+    x.netOpDirect = x.income-x.cogs-x.directExp;
+    x.net = x.netOpDirect-x.allocOH;
+    x.grossMargin = x.income ? x.grossProfit/x.income : null;
+    x.trueMargin = x.income ? x.net/x.income : null;
+    x.personnelRatio = x.income ? x.personnel/x.income : null;
+  });
+  return R;
+}
+// oneTimeFlags: { 'YYYY-MM': Set|array of misc line names flagged one-time }
+function finComputeMonth(cm, adjTab, oneTimeNames){
+  const flagged=new Set(oneTimeNames||[]);
+  const oneTimeByClass={}; let oneTimeTotal=0; const oneTimeItems=[];
+  cm.misc.forEach(l=>{ if(!flagged.has(l.name)) return; oneTimeItems.push({name:l.name,total:l.total,amounts:l.amounts}); oneTimeTotal+=l.total;
+    Object.entries(l.amounts).forEach(([c,v])=>{ oneTimeByClass[c]=(oneTimeByClass[c]||0)+v; }); });
+  const C=cm.byClass;
+  const H=C.Linkage.hospitalIncome||0;
+  const svc={}; FIN_CARESOURCE_SPLIT.forEach(k=>{ const d=FIN_DIVS.find(x=>x.key===k); svc[k]=Math.max(0,C[d.cls].services||0); });
+  const svcTot=Object.values(svc).reduce((s,v)=>s+v,0);
+  const caresource={ amount:H, split:{} };
+  const divs={};
+  FIN_DIVS.forEach(d=>{
+    const c=C[d.cls];
+    let income=c.income-(oneTimeByClass[d.cls]||0);
+    if(d.key==='linkage') income-=H;
+    if(H && FIN_CARESOURCE_SPLIT.includes(d.key)){ const part=svcTot? H*svc[d.key]/svcTot : (d.key==='linkage'?H:0); income+=part; caresource.split[d.key]=part; }
+    let cogs=c.cogs, personnel=c.personnel;
+    if(d.key==='hospitals'){ cogs-=c.adminSubCogs||0; personnel-=c.adminSubPersonnel||0; }
+    divs[d.key]={ name:d.name, income, cogs, directExp:c.exp, personnel,
+                  book:{income:c.income, cogs:c.cogs, directExp:c.exp}, adj:{rev:0,bb:0,hi:0,er:0,sw:0} };
+  });
+  const A=C.Administrative;
+  const hospAdmin=C.Hospitals.adminSubCogs||0;
+  let adminCogs=A.cogs+hospAdmin, adminExpense=A.exp;
+  const adminIncome=A.income-(oneTimeByClass.Administrative||0);
+  let revAdjTotal=0, adjTotals=null;
+  if(adjTab){
+    FIN_DIVS.forEach(d=>{
+      const x=divs[d.key];
+      ['rev','bb','hi','er','sw'].forEach(k=>{ x.adj[k]=adjTab.adj[k][d.key]||0; });
+      x.income+=x.adj.rev;
+      x.cogs+=x.adj.bb+x.adj.hi+x.adj.er+x.adj.sw;
+      x.personnel+=x.adj.bb;
+    });
+    adjTotals=adjTab.totals;
+    revAdjTotal=adjTab.totals.rev;
+    adminCogs += -adjTab.totals.hi - adjTab.totals.sw - adjTab.totals.bb;
+    adminExpense += -adjTab.totals.er;
+  }
+  const pool=adminCogs+adminExpense;
+  const divRev=finAllocate(divs,pool);
+  const divNet=FIN_DIVS.reduce((s,d)=>s+divs[d.key].net,0);
+  const companyNet=divNet+adminIncome;
+  return {
+    ym:cm.ym, label:cm.label, fileName:cm.fileName,
+    divisions:divs, divRev, pool, adminCogs, adminExpense, adminIncome,
+    adminBook:{income:A.income, cogs:A.cogs, exp:A.exp},
+    hospitalsAdminCogs:hospAdmin, hospitalsAdminFound:cm.hospitalsAdminFound,
+    caresource, oneTimeItems, oneTimeTotal, revAdjTotal, adjTotals, adjSource: adjTab ? {label:adjTab.label, sheet:adjTab.sheet, fileName:adjTab.fileName} : null,
+    companyNet, fileTotal:cm.fileTotal, callCenters:C['Call Centers'].income,
+  };
+}
+// Sum several computed months (block, YTD) and re-spread overhead over the combined revenue.
+function finSumMonths(months){
+  const divs={};
+  FIN_DIVS.forEach(d=>{ divs[d.key]={name:d.name,income:0,cogs:0,directExp:0,personnel:0}; });
+  const t={pool:0, adminCogs:0, adminExpense:0, adminIncome:0, oneTimeTotal:0, revAdjTotal:0, noi:0, fileIncome:0, hospitalsAdminCogs:0, caresource:{amount:0,split:{}}};
+  months.forEach(m=>{
+    FIN_DIVS.forEach(d=>{ ['income','cogs','directExp','personnel'].forEach(f=>{ divs[d.key][f]+=m.divisions[d.key][f]||0; }); });
+    t.pool+=m.pool; t.adminCogs+=m.adminCogs; t.adminExpense+=m.adminExpense; t.adminIncome+=m.adminIncome;
+    t.oneTimeTotal+=m.oneTimeTotal||0; t.revAdjTotal+=m.revAdjTotal||0; t.hospitalsAdminCogs+=m.hospitalsAdminCogs||0;
+    if(m.fileTotal){ t.noi+=m.fileTotal.noi||0; t.fileIncome+=m.fileTotal.income||0; }
+    t.caresource.amount+=(m.caresource&&m.caresource.amount)||0;
+    Object.entries((m.caresource&&m.caresource.split)||{}).forEach(([k,v])=>{ t.caresource.split[k]=(t.caresource.split[k]||0)+v; });
+  });
+  const divRev=finAllocate(divs,t.pool);
+  const divNet=FIN_DIVS.reduce((s,d)=>s+divs[d.key].net,0);
+  return Object.assign(t,{ divisions:divs, divRev, divNet, companyNet:divNet+t.adminIncome, months:months.map(m=>m.ym) });
+}
+function finComputeGroup(group, oneTimeFlags){
+  const n=group.months.length;
+  const months=group.months.map((cm,i)=>finComputeMonth(cm, i===n-1?group.tab:null, (oneTimeFlags||{})[cm.ym]));
+  return { periodKey:group.periodKey, label:group.label, months, total:finSumMonths(months), tab:group.tab };
+}
+// History entry Director Hub / SLG Hub read (director_financial_history). Approval is stamped on publish.
+function finHistoryEntry(m, blockNote){
+  const divisions={};
+  FIN_DIVS.forEach(d=>{ const x=m.divisions[d.key];
+    divisions[d.key]={ name:x.name, income:x.income, cogs:x.cogs, directExp:x.directExp, personnel:x.personnel, allocOH:x.allocOH,
+                       grossMargin:x.grossMargin||0, trueMargin:x.trueMargin||0, personnelRatio:x.personnelRatio||0 }; });
+  const e={ period:m.label, ym:m.ym, updated:new Date().toISOString().slice(0,10), adminPool:m.pool, totalRev:m.divRev, divisions,
+            adminClass:{ income:m.adminIncome, cogs:m.adminCogs, cogsInPool:true, oneTimeExcluded:m.oneTimeTotal||0 },
+            overhead:{ adminCogs:m.adminCogs, adminExpense:m.adminExpense, total:m.pool },
+            rules:'comptroller-2026-11-13' };
+  if(blockNote) e.adjustmentsNote=blockNote;
+  return e;
+}
+function finSubmissionPayload(group, computed, oneTimeFlags, files){
+  const n=computed.months.length;
+  const blockNote = n>1 ? `Carries the Comptroller's ${group.label} adjustments as one block; ${finYmShort(computed.months[0].ym)}–${finYmShort(computed.months[n-2].ym)} show Class figures only.` : null;
+  return {
+    schema:1, rules:'comptroller-2026-11-13', periodKey:group.periodKey, label:group.label,
+    months:group.months, adjustments:group.tab, oneTimeFlags:Object.fromEntries(group.months.map(m=>[m.ym,[...((oneTimeFlags||{})[m.ym]||[])]])),
+    entries:computed.months.map((m,i)=>finHistoryEntry(m, (n>1&&i===n-1)?blockNote:null)),
+    files, computedAt:new Date().toISOString(),
+  };
+}
+// Rebuild computed months from a stored submission (so the approval screen always shows the same math).
+function finRecompute(data){
+  const g={ months:data.months, tab:data.adjustments, periodKey:data.periodKey, label:data.label };
+  return finComputeGroup(g, data.oneTimeFlags||{});
+}
+
+// ── Checks shown on the approval screen ──────────────────────────────────────
+function finChecks(computed, priorMonth){
+  const out=[];
+  computed.months.forEach(m=>{
+    const recon = m.divRev + m.adminIncome + m.oneTimeTotal - m.revAdjTotal;
+    const d1 = recon - m.fileTotal.income;
+    out.push({ id:'tie_'+m.ym, kind:'tie', ym:m.ym, pass:Math.abs(d1)<1,
+      label:`${finYmShort(m.ym)}: divisions + Administrative = file total`,
+      detail:`Divisions ${finFmt(m.divRev)} + Administrative ${finFmt(m.adminIncome)} + one-time ${finFmt(m.oneTimeTotal)} − net revenue adjustments ${finFmt(m.revAdjTotal)} = ${finFmt(recon)} vs file Total Income ${finFmt(m.fileTotal.income)}${Math.abs(d1)<1?'':' (off by '+finFmt(d1)+')'}` });
+    const expect = m.fileTotal.noi - m.oneTimeTotal + m.revAdjTotal;
+    const d2 = m.companyNet - expect;
+    out.push({ id:'net_'+m.ym, kind:'net', ym:m.ym, pass:Math.abs(d2)<1,
+      label:`${finYmShort(m.ym)}: company net = QuickBooks NOI − one-time items − NACCHO`,
+      detail:`Company net ${finFmt(m.companyNet)} vs NOI ${finFmt(m.fileTotal.noi)} − one-time ${finFmt(m.oneTimeTotal)} ${m.revAdjTotal<0?'−':'+'} net revenue adjustments ${finFmt(Math.abs(m.revAdjTotal))}${m.adjSource&&m.adjSource.label!==m.label?` (${m.adjSource.label} block)`:''} = ${finFmt(expect)}${Math.abs(d2)<1?'':' (off by '+finFmt(d2)+')'}` });
+  });
+  // Margin swings vs the prior month (prior approved month for the first month of the upload).
+  const swings=[];
+  let prev=priorMonth||null;
+  computed.months.forEach(m=>{
+    if(prev){
+      FIN_DIVS.forEach(d=>{
+        const a=prev.divisions[d.key], b=m.divisions[d.key]; if(!a||!b) return;
+        [['gross','grossMargin'],['net','trueMargin']].forEach(([lbl,f])=>{
+          if(a[f]==null||b[f]==null) return;
+          const pts=(b[f]-a[f])*100;
+          if(Math.abs(pts)>FIN_SWING_POINTS) swings.push(`${finYmShort(m.ym)} ${d.name} ${lbl} margin ${pts>0?'+':''}${pts.toFixed(1)} pts (${(a[f]*100).toFixed(1)}% → ${(b[f]*100).toFixed(1)}%)`);
+        });
+      });
+    }
+    prev=m;
+  });
+  out.push({ id:'swing', kind:'swing', pass:swings.length===0,
+    label:`No division margin moved more than ${FIN_SWING_POINTS} points vs the prior month`,
+    detail: swings.length ? swings.join('; ') : (priorMonth||computed.months.length>1 ? 'All within '+FIN_SWING_POINTS+' points.' : 'No prior month on file to compare.') });
+  const cc=computed.months.filter(m=>Math.abs(m.callCenters-FIN_CALL_CENTER_MONTHLY)>0.5);
+  out.push({ id:'callcenters', kind:'info', pass:!cc.length, label:`Call Centers = ${finFmt(FIN_CALL_CENTER_MONTHLY,2)} a month (1/12 of the Cuyahoga Warmline award)`,
+    detail: cc.length ? cc.map(m=>`${finYmShort(m.ym)}: ${finFmt(m.callCenters,2)}`).join('; ') : 'Matches every month.' });
+  const noAdmin=computed.months.filter(m=>!m.hospitalsAdminFound);
+  if(noAdmin.length) out.push({ id:'hospadmin', kind:'info', pass:false, label:'Hospitals Admin sub-class found', detail:`No Hospitals "Admin" column in ${noAdmin.map(m=>finYmShort(m.ym)).join(', ')}; nothing was removed for those months.` });
+  return out;
+}
+function finFmt(n,dp){ if(n==null||isNaN(n)) return '—'; const v=Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:dp||0,maximumFractionDigits:dp||0}); return (n<0?'−$':'$')+v; }
+function finPct(x){ return x==null||!isFinite(x) ? '—' : (x*100).toFixed(1)+'%'; }
+
+// Compare a YTD sum with the approved Jan–Oct 2026 baseline. Every whole-dollar figure and
+// every one-decimal margin must match.
+function finBaselineCompare(ytd){
+  const rows=FIN_DIVS.map(d=>{
+    const x=ytd.divisions[d.key], b=FIN_BASELINE.rows[d.key];
+    const got={income:Math.round(x.income), cogs:Math.round(x.cogs), directExp:Math.round(x.directExp), alloc:Math.round(x.allocOH),
+               gm:+(x.grossMargin*100).toFixed(1), nm:+(x.trueMargin*100).toFixed(1), net:Math.round(x.net)};
+    const diffs=Object.keys(b).filter(k=>got[k]!==b[k]);
+    return {key:d.key, name:d.name, got, want:b, ok:!diffs.length, diffs};
+  });
+  const net=Math.round(ytd.companyNet);
+  return { rows, companyNet:net, ok: rows.every(r=>r.ok) && net===FIN_BASELINE.companyNet };
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MONTHLY FINANCIALS PAGE (11/13/26) — upload → Pending → Comptroller approves or sends back.
+// Replaces the old "QuickBooks P&L by Class" upload, which wrote straight into
+// director_financial_history. Now:
+//   • Brandon (app_roles 'fin_uploader') uploads the P&L by Class (base) + the Comptroller's
+//     P&L by Contract (read only for his adjustment rows) → fin_submit() → status Pending.
+//   • Eric (app_roles 'fin_approver') reviews the approval screen → fin_decide() Approve / Send back.
+//   • Approval runs fin_publish() in Supabase, which rebuilds director_financial and
+//     director_financial_history from Approved months only. Nothing else can write those keys.
+//   • Approved months are locked; a re-upload is a new version that needs re-approval.
+// Pending uploads are visible only to the uploader and approver roles (RLS on fin_submissions).
+// ══════════════════════════════════════════════════════════════════════════════
+const FIN = { roles:[], roleName:null, loaded:false, loading:false, err:null, subs:[], audit:[], sel:null,
+              finOnly:false, up:null, busy:null, msg:null, note:'' };
+function finHas(r){ return FIN.roles.includes(r); }
+function finIsUploader(){ return finHas('fin_uploader'); }
+function finIsApprover(){ return finHas('fin_approver'); }
+function finAnyRole(){ return finIsUploader() || finIsApprover(); }
+function finActorName(){ return FIN.roleName || (DS_USER&&DS_USER.name) || null; }
+async function finLoadRoles(){
+  try{
+    const {data,error}=await dsSb.rpc('my_app_roles');
+    if(error||!Array.isArray(data)) { FIN.roles=[]; return; }
+    FIN.roles=data.map(r=>r.role);
+    const named=data.find(r=>r.display_name); FIN.roleName=named?named.display_name:null;
+  }catch(e){ FIN.roles=[]; }
+}
+async function finLoad(){
+  if(!finAnyRole()) return;
+  FIN.loading=true; FIN.err=null;
+  try{
+    const [s,a]=await Promise.all([
+      dsSb.from('fin_submissions').select('*').order('first_month',{ascending:true}).order('version',{ascending:true}),
+      dsSb.from('fin_audit').select('*').order('at',{ascending:false}).limit(200),
+    ]);
+    if(s.error) throw s.error;
+    FIN.subs=(s.data||[]).map(r=>{ try{ r._calc=finRecompute(r.data); }catch(e){ r._calcErr=e.message; } return r; });
+    FIN.audit=a.error?[]:(a.data||[]);
+    FIN.loaded=true;
+    if(FIN.sel && !FIN.subs.some(x=>x.id===FIN.sel)) FIN.sel=null;
+    if(!FIN.sel){ const p=FIN.subs.filter(x=>x.status==='Pending'); FIN.sel = p.length ? p[p.length-1].id : null; }
+  }catch(e){ FIN.err='Couldn’t load the financial uploads: '+(e.message||e)+'. If this is the first run, check that the Supabase setup script has been run.'; }
+  FIN.loading=false;
+  if(S.view==='fin') render(); else renderHdr();
+}
+// The version of each month that counts right now: Approved if there is one, else the newest Pending.
+function finCurrentByMonth({includePending=true}={}){
+  const by={};
+  FIN.subs.filter(s=>!s.is_test && s._calc).forEach(s=>{
+    const ok = s.status==='Approved' || (includePending && s.status==='Pending');
+    if(!ok) return;
+    s._calc.months.forEach(m=>{
+      const cur=by[m.ym];
+      if(!cur || (cur.sub.status!=='Approved' && (s.status==='Approved' || s.version>cur.sub.version))) by[m.ym]={m, sub:s};
+    });
+  });
+  return by;
+}
+function finYtdFor(sub){
+  const months=sub._calc.months; const year=months[months.length-1].ym.slice(0,4);
+  const own=new Set(months.map(m=>m.ym));
+  const by=finCurrentByMonth();
+  const prior=Object.keys(by).filter(ym=>ym.slice(0,4)===year && ym<months[0].ym && !own.has(ym)).sort();
+  const pendingIncluded=prior.filter(ym=>by[ym].sub.status!=='Approved');
+  const all=prior.map(ym=>by[ym].m).concat(months);
+  const firstYm=all.length?all[0].ym:months[0].ym;
+  return { ytd:finSumMonths(all), from:firstYm, to:months[months.length-1].ym, pendingIncluded };
+}
+function finPriorMonth(sub){
+  const first=sub._calc.months[0].ym; let [y,m]=first.split('-').map(Number); m--; if(!m){m=12;y--;}
+  const ym=y+'-'+String(m).padStart(2,'0'); const by=finCurrentByMonth(); return by[ym]?by[ym]:null;
+}
+function finSubChecks(sub){
+  const prior=finPriorMonth(sub);
+  const checks=finChecks(sub._calc, prior?prior.m:null);
+  const swing=checks.find(c=>c.id==='swing');
+  const priorEntry = prior && (prior.sub.data.entries||[]).find(e=>e.ym===prior.m.ym);
+  if(swing && priorEntry && priorEntry.adjustmentsNote && sub._calc.months.length===1){
+    swing.pass=true; swing.kind='info';
+    swing.detail=`Not compared: ${finYmShort(prior.m.ym)} carries the Comptroller's whole ${prior.sub.data.label} adjustment block, so a month-to-month swing would be misleading. YTD is exact.`;
+  } else if(swing && sub._calc.months.length>1){
+    swing.kind='info';
+    swing.label+=' (informational for a multi-month block: the adjustments land in the last month)';
+  }
+  return checks;
+}
+function finStatusPill(st, test){
+  const c={Pending:['#FEF3C7','#92400E'],'Approved':['#DCFCE7','#166534'],'Sent back':['#FEE2E2','#991B1B'],'Superseded':['#E5E7EB','#4B5563']}[st]||['#eee','#333'];
+  return `<span class="fin-pill" style="background:${c[0]};color:${c[1]}">${xe(st)}</span>${test?' <span class="fin-pill" style="background:#EDE9FE;color:#5B21B6">TEST</span>':''}`;
+}
+function finDate(ts){ if(!ts) return '—'; const d=new Date(ts.length===10?ts+'T12:00:00':ts); return isNaN(d)?xe(ts):d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+function finDateTime(ts){ if(!ts) return '—'; const d=new Date(ts); return isNaN(d)?xe(ts):d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }
+function finMarginCell(x,target){
+  if(x==null||!isFinite(x)) return '<td class="n">—</td>';
+  const cls = x>=target ? 'fin-good' : x>=0 ? 'fin-warn' : 'fin-bad';
+  return `<td class="n ${cls}">${finPct(x)}</td>`;
+}
+function finTable(sum, title, sub){
+  const rows=FIN_DIVS.map(d=>{ const x=sum.divisions[d.key]; const gmT=d.key==='clinical'?0:FIN_GM_TARGET;
+    return `<tr><td>${xe(d.name)}</td><td class="n">${finFmt(x.income)}</td><td class="n">${finFmt(x.cogs)}</td><td class="n">${finFmt(x.directExp)}</td><td class="n">${finFmt(x.allocOH)}</td>${finMarginCell(x.grossMargin,gmT)}${finMarginCell(x.trueMargin,FIN_NM_TARGET)}<td class="n">${finFmt(x.net)}</td></tr>`; }).join('');
+  const t=FIN_DIVS.reduce((a,d)=>{ const x=sum.divisions[d.key]; a.i+=x.income;a.c+=x.cogs;a.e+=x.directExp;a.o+=x.allocOH;a.n+=x.net; return a; },{i:0,c:0,e:0,o:0,n:0});
+  const coRev=t.i+sum.adminIncome;
+  return `<div class="fin-tw"><div class="fin-th">${title}${sub?`<span>${sub}</span>`:''}</div><table class="fin-tbl">
+    <thead><tr><th>Division</th><th class="n">Revenue</th><th class="n">COGS</th><th class="n">Direct exp</th><th class="n">Overhead</th><th class="n">Gross margin</th><th class="n">Net margin</th><th class="n">Net income</th></tr></thead>
+    <tbody>${rows}
+    <tr class="fin-sub"><td>Divisions total</td><td class="n">${finFmt(t.i)}</td><td class="n">${finFmt(t.c)}</td><td class="n">${finFmt(t.e)}</td><td class="n">${finFmt(t.o)}</td><td class="n">${finPct(t.i?(t.i-t.c)/t.i:null)}</td><td class="n">${finPct(t.i?t.n/t.i:null)}</td><td class="n">${finFmt(t.n)}</td></tr>
+    <tr><td>Administrative income <span class="fin-mut">(excl. one-time)</span></td><td class="n">${finFmt(sum.adminIncome)}</td><td colspan="5" class="fin-mut" style="white-space:normal">Overhead pool ${finFmt(sum.pool)} = remaining Admin COGS ${finFmt(sum.adminCogs)} + Admin expenses ${finFmt(sum.adminExpense)}</td><td class="n">${finFmt(sum.adminIncome)}</td></tr>
+    <tr class="fin-tot"><td>Company</td><td class="n">${finFmt(coRev)}</td><td colspan="4"></td><td class="n">${finPct(coRev?sum.companyNet/coRev:null)}</td><td class="n">${finFmt(sum.companyNet)}</td></tr>
+    </tbody></table></div>`;
+}
+function finChecksHtml(checks){
+  return `<div class="fin-checks">${checks.map(c=>{
+    return `<div class="fin-check"><span class="fin-dot" style="background:${c.pass?'#16A34A':(c.kind==='info'?'#D97706':'#DC2626')}"></span><div><div class="fin-cl">${xe(c.label)}</div><div class="fin-cd">${xe(c.detail)}</div></div></div>`;
+  }).join('')}</div>`;
+}
+function finAdjHtml(calc){
+  const last=calc.months[calc.months.length-1]; const tab=calc.tab;
+  const cols=['rev','bb','hi','er','sw'];
+  const head=`<tr><th>Division</th>${cols.map(k=>`<th class="n">${xe(FIN_ADJ_LABELS[k].replace(' (incl. NACCHO)',''))}</th>`).join('')}</tr>`;
+  const body=FIN_DIVS.map(d=>`<tr><td>${xe(d.name)}</td>${cols.map(k=>`<td class="n">${tab.adj[k][d.key]?finFmt(tab.adj[k][d.key]):'<span class="fin-mut">—</span>'}</td>`).join('')}</tr>`).join('')
+    +`<tr class="fin-sub"><td>Total</td>${cols.map(k=>`<td class="n">${finFmt(tab.totals[k])}</td>`).join('')}</tr>`;
+  const tot=calc.total;
+  const cs=tot.caresource.amount ? Object.entries(tot.caresource.split).map(([k,v])=>`${xe(FIN_DIVS.find(d=>d.key===k).name)} ${finFmt(v)}`).join(' · ') : null;
+  const oneTime=calc.months.flatMap(m=>(m.oneTimeItems||[]).map(o=>`${finYmShort(m.ym)}: ${xe(o.name)} ${finFmt(o.total)}`));
+  return `<details class="fin-det"><summary>Rules applied: adjustments, CareSource, one-time items, Hospitals Admin</summary>
+    <div class="fin-mut" style="margin:6px 0 8px">Comptroller's adjustment rows from <strong>${xe(tab.fileName||'')}</strong>, tab “${xe(tab.sheet)}” (${xe(tab.label)})${calc.months.length>1?`, applied to ${xe(finYmLabel(last.ym))} as one block`:''}. The Contract file's own revenue and COGS are not used.</div>
+    <table class="fin-tbl"><thead>${head}</thead><tbody>${body}</tbody></table>
+    <ul class="fin-ul">
+      <li>NACCHO (Thrive for Change contract) excluded from Justice: ${finFmt(tab.naccho||0)}.</li>
+      <li>Offsets: HI ${finFmt(tab.totals.hi)} and software ${finFmt(tab.totals.sw)} come out of Administrative COGS; removed BB wages ${finFmt(-tab.totals.bb)} go to Administrative COGS; ER-tax reclass ${finFmt(tab.totals.er)} is offset in the Administrative expense pool.</li>
+      <li>Hospitals Admin sub-class COGS removed (belongs to no division): ${finFmt(tot.hospitalsAdminCogs)}.</li>
+      <li>CareSource bonus (Linkage “Hospital Income”) ${finFmt(tot.caresource.amount)}${cs?` split by services income: ${cs}`:' — none this period'}. True up to the actual amount when collected in 2027.</li>
+      <li>One-time items excluded from revenue: ${oneTime.length?oneTime.join('; '):'none'}.</li>
+      <li>Pimsy figures elsewhere are “by service date”; QuickBooks books by invoice date.</li>
+    </ul></details>`;
+}
+function finBaselineHtml(){
+  if(!finIsUploader()) return '';
+  if(FIN.subs.some(s=>!s.is_test && s.approved_on)) return '';
+  const pend=FIN.subs.filter(s=>!s.is_test && s.status==='Pending' && s._calc && s.last_month<='2026-10-31');
+  if(!pend.length) return '';
+  const months=pend.flatMap(s=>s._calc.months).sort((a,b)=>a.ym.localeCompare(b.ym));
+  const yms=months.map(m=>m.ym);
+  const want=[]; for(let k=1;k<=10;k++) want.push('2026-'+String(k).padStart(2,'0'));
+  const complete = want.every(y=>yms.includes(y)) && yms.length===10;
+  if(!complete) return `<div class="fin-card fin-note">Baseline: upload all ten Jan–Oct 2026 Class files plus the Comptroller's P&amp;L by Contract (Jan–Aug block, Sep, Oct) to record the Nov 13 approval. On file now: ${xe(yms.map(finYmShort).join(', ')||'none')}.</div>`;
+  const ytd=finSumMonths(months); const cmp=finBaselineCompare(ytd);
+  const cell=(r,k,fmt)=>`<td class="n ${r.diffs.includes(k)?'fin-bad':''}">${fmt(r.got[k])}${r.diffs.includes(k)?`<div class="fin-mut">want ${fmt(r.want[k])}</div>`:''}</td>`;
+  const money=v=>finFmt(v), pct=v=>v.toFixed(1)+'%';
+  return `<div class="fin-card" style="border-left:4px solid ${cmp.ok?'#16A34A':'#DC2626'}">
+    <div class="fin-h3">Jan–Oct 2026 baseline vs the approved Final Numbers</div>
+    <div class="fin-mut" style="margin-bottom:8px">${xe(FIN_BASELINE.note)} Every figure must match before the approval can be recorded.</div>
+    <div class="fin-tw"><table class="fin-tbl"><thead><tr><th>Division</th><th class="n">Revenue</th><th class="n">COGS</th><th class="n">Direct exp</th><th class="n">Overhead</th><th class="n">Gross</th><th class="n">Net</th><th class="n">Net income</th><th></th></tr></thead><tbody>
+    ${cmp.rows.map(r=>`<tr><td>${xe(r.name)}</td>${cell(r,'income',money)}${cell(r,'cogs',money)}${cell(r,'directExp',money)}${cell(r,'alloc',money)}${cell(r,'gm',pct)}${cell(r,'nm',pct)}${cell(r,'net',money)}<td>${r.ok?'✓':'✗'}</td></tr>`).join('')}
+    <tr class="fin-tot"><td>Company net</td><td colspan="6"></td><td class="n ${cmp.companyNet===FIN_BASELINE.companyNet?'':'fin-bad'}">${finFmt(cmp.companyNet)}</td><td>${cmp.companyNet===FIN_BASELINE.companyNet?'✓':'✗ want '+finFmt(FIN_BASELINE.companyNet)}</td></tr>
+    </tbody></table></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn-n" ${cmp.ok&&!FIN.busy?'':'disabled'} onclick="finRecordBaseline()">Record Comptroller approval (${xe(FIN_BASELINE.approver)}, Nov 13, 2026)</button>
+    </div></div>`;
+}
+function finUploadHtml(){
+  if(!finIsUploader()) return '';
+  const u=FIN.up;
+  const files = u ? [...(u.classFiles||[]),...(u.contractFiles||[])] : [];
+  let preview='';
+  if(u && u.error) preview=`<div class="fin-err">${xe(u.error)}</div>`;
+  else if(u && u.plan){
+    const groups=u.plan.groups.map((g,gi)=>{
+      const comp=u.computed[gi];
+      const otRows=g.months.filter(m=>m.misc.length).map(m=>`<div class="fin-ot"><strong>${xe(finYmShort(m.ym))}</strong> ${m.misc.map(l=>{ const on=(u.flags[m.ym]||[]).includes(l.name);
+        return `<label><input type="checkbox" ${on?'checked':''} onchange="finToggleOneTime('${m.ym}',${JSON.stringify(l.name).replace(/"/g,'&quot;')},this.checked)"> ${xe(l.name)} ${finFmt(l.total,2)}</label>`; }).join('')}</div>`).join('');
+      return `<div class="fin-card" style="margin:10px 0 0">
+        <div class="fin-h3">${xe(g.label)} <span class="fin-mut">→ ${g.months.length} Class file${g.months.length>1?'s':''} + adjustments tab “${xe(g.tab.sheet)}” of ${xe(g.tab.fileName)}</span></div>
+        ${finTable(comp.total, g.months.length>1?'Block total':'This month', '')}
+        <div class="fin-mut" style="margin-top:8px">One-time items (excluded from operating and division revenue). Suggested ones are pre-ticked; change them if needed.</div>${otRows||'<div class="fin-mut">No miscellaneous income lines.</div>'}
+      </div>`; }).join('');
+    preview=`${u.plan.warnings.map(w=>`<div class="fin-warnbox">${xe(w)}</div>`).join('')}
+      ${u.plan.unusedTabs.length?`<div class="fin-mut">Adjustment tabs not used (no matching Class month in this upload): ${xe(u.plan.unusedTabs.join(', '))}.</div>`:''}
+      ${groups}
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;flex-wrap:wrap">
+        <label class="fin-mut"><input type="checkbox" ${u.isTest?'checked':''} ${u.forcedTest?'disabled':''} onchange="FIN.up.isTest=this.checked;render()"> Test upload (fake data; can only be sent back)${u.forcedTest?' — detected “TEST” in the file':''}</label>
+        <button class="btn-g" onclick="FIN.up=null;render()">Cancel</button>
+        <button class="btn-n" ${FIN.busy?'disabled':''} onclick="finSubmit()">Submit ${u.plan.groups.length} period${u.plan.groups.length>1?'s':''} for approval</button>
+      </div>`;
+  }
+  return `<div class="fin-card">
+    <div class="fin-h3">Upload a month</div>
+    <div class="fin-mut" style="margin-bottom:10px">Business day 3: upload the P&amp;L by Class (the base, one month per file) and the Comptroller's P&amp;L by Contract (read only for his adjustment rows). Both go in together; the month becomes <strong>Pending</strong> until the Comptroller approves it.</div>
+    <div class="fin-up">
+      <label class="fin-drop">P&amp;L by Class (.xlsx, one or more months)<input type="file" accept=".xlsx" multiple onchange="finPickFiles('class',this)"></label>
+      <label class="fin-drop">P&amp;L by Contract (.xlsx)<input type="file" accept=".xlsx" multiple onchange="finPickFiles('contract',this)"></label>
+    </div>
+    ${files.length?`<div class="fin-mut" style="margin-top:8px">Selected: ${files.map(f=>xe(f.name)).join(' · ')}${u&&u.parsing?' — reading…':''}</div>`:''}
+    ${preview}
+  </div>`;
+}
+function finListHtml(){
+  const real=FIN.subs.filter(s=>!s.is_test), tests=FIN.subs.filter(s=>s.is_test);
+  const row=s=>`<tr class="${FIN.sel===s.id?'fin-selrow':''}" onclick="FIN.sel='${s.id}';FIN.note='';render()" style="cursor:pointer">
+    <td>${xe(s.data&&s.data.label||s.period_key)}</td><td class="n">v${s.version}</td><td>${finStatusPill(s.status,s.is_test)}</td>
+    <td>${xe(s.uploaded_by_name||'—')}<div class="fin-mut">${finDateTime(s.uploaded_at)}</div></td>
+    <td>${s.status==='Approved'?`${xe(s.decided_by_name||'—')}<div class="fin-mut">${finDate(s.approved_on)}${s.recorded_by_name?' · recorded by '+xe(s.recorded_by_name):''}</div>`:s.status==='Sent back'?`${xe(s.decided_by_name||'')}<div class="fin-mut">${finDateTime(s.decided_at)}</div>`:'<span class="fin-mut">—</span>'}</td></tr>`;
+  const sorted=list=>list.slice().sort((a,b)=>b.last_month.localeCompare(a.last_month)||b.version-a.version);
+  return `<div class="fin-card"><div class="fin-h3">Periods on file</div>
+    ${real.length?`<div class="fin-tw"><table class="fin-tbl fin-click"><thead><tr><th>Period</th><th class="n">Version</th><th>Status</th><th>Uploaded</th><th>Decision</th></tr></thead><tbody>${sorted(real).map(row).join('')}</tbody></table></div>`:'<div class="fin-mut">Nothing uploaded yet.</div>'}
+    ${tests.length?`<details class="fin-det"><summary>Test uploads (${tests.length})</summary><div class="fin-tw"><table class="fin-tbl fin-click"><tbody>${sorted(tests).map(row).join('')}</tbody></table></div></details>`:''}
+  </div>`;
+}
+function finReviewHtml(){
+  const s=FIN.subs.find(x=>x.id===FIN.sel); if(!s) return '';
+  if(!s._calc) return `<div class="fin-card fin-err">This upload couldn't be recalculated: ${xe(s._calcErr||'unknown error')}</div>`;
+  const calc=s._calc; const multi=calc.months.length>1;
+  const {ytd,from,to,pendingIncluded}=finYtdFor(s);
+  const checks=finSubChecks(s); const reds=checks.filter(c=>!c.pass && c.kind!=='info').length;
+  const files=(s.class_files||[]).concat(s.contract_file?[s.contract_file]:[]);
+  let state='';
+  if(s.status==='Approved') state=`<div class="fin-okbox">Approved by ${xe(s.decided_by_name||'')} on ${finDate(s.approved_on)}${s.recorded_by_name?` (recorded by ${xe(s.recorded_by_name)})`:''}. Locked: a correction becomes a new version that needs approval.${s.decision_note?`<div class="fin-mut">${xe(s.decision_note)}</div>`:''}</div>`;
+  if(s.status==='Sent back') state=`<div class="fin-err"><strong>Sent back</strong> by ${xe(s.decided_by_name||'')} on ${finDateTime(s.decided_at)}: ${xe(s.decision_note||'')}<div class="fin-mut">Fix the files and upload this period again; the Comptroller re-approves within 2 business days.</div></div>`;
+  if(s.status==='Superseded') state=`<div class="fin-warnbox">Superseded by a newer version on ${finDateTime(s.superseded_at)}. Kept for the audit trail.</div>`;
+  const monthly = multi ? `<details class="fin-det"><summary>Month by month (${calc.months.length} months)</summary>${calc.months.map(m=>finTable(Object.assign(finSumMonths([m])), finYmLabel(m.ym), m.adjSource?`with the ${xe(m.adjSource.label)} adjustments`:'Class figures only')).join('')}</details>` : '';
+  let actions='';
+  if(s.status==='Pending' && finIsApprover()){
+    actions=`<div class="fin-card fin-act"><div class="fin-h3">Comptroller decision</div>
+      ${reds?`<div class="fin-warnbox">${reds} check${reds>1?'s are':' is'} red. Review before approving.</div>`:''}
+      <textarea class="inp" rows="2" placeholder="Note (required to send back)" oninput="FIN.note=this.value">${xe(FIN.note||'')}</textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">
+        <button class="btn-g" ${FIN.busy?'disabled':''} onclick="finDecide('send_back')">Send back</button>
+        <button class="btn-n" ${FIN.busy||s.is_test?'disabled':''} title="${s.is_test?'Test uploads can only be sent back':''}" onclick="finDecide('approve')">Approve ${xe(s.data.label)}</button>
+      </div>${s.is_test?'<div class="fin-mut" style="text-align:right;margin-top:6px">Test upload: it can only be sent back.</div>':''}</div>`;
+  } else if(s.status==='Pending'){
+    actions=`<div class="fin-note fin-card">Waiting for the Comptroller. Pending months are visible only to the uploader and the Comptroller; Director Hub and SLG Hub keep showing the last approved month.</div>`;
+  }
+  return `<div class="fin-card">
+    <div class="fin-h2">${xe(s.data.label)} ${finStatusPill(s.status,s.is_test)} <span class="fin-mut">v${s.version}</span></div>
+    <div class="fin-mut">Uploaded by ${xe(s.uploaded_by_name||'—')}, ${finDateTime(s.uploaded_at)} · Files: ${files.map(xe).join(' · ')}</div>
+    ${state}
+    <div class="fin-grid2">
+      ${finTable(calc.total, multi?`${xe(s.data.label)} (block)`:`${xe(s.data.label)} (month)`, '')}
+      ${finTable(ytd, `YTD ${xe(finYmShort(from))} – ${xe(finYmShort(to))}`, pendingIncluded.length?`includes pending ${pendingIncluded.length>2?finYmShort(pendingIncluded[0])+' – '+finYmShort(pendingIncluded[pendingIncluded.length-1]):pendingIncluded.map(finYmShort).join(', ')}`:'')}
+    </div>
+    ${monthly}
+    <div class="fin-h3" style="margin-top:14px">Automatic checks</div>
+    ${finChecksHtml(checks)}
+    ${finAdjHtml(calc)}
+  </div>${actions}`;
+}
+function finAuditHtml(){
+  if(!FIN.audit.length) return '';
+  return `<details class="fin-det fin-card"><summary>Audit trail (${FIN.audit.length})</summary><div class="fin-tw"><table class="fin-tbl"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Period</th><th>Note</th><th>Files</th></tr></thead><tbody>
+    ${FIN.audit.map(a=>`<tr><td>${finDateTime(a.at)}</td><td>${xe(a.actor_name||'—')}</td><td>${xe(a.action)}</td><td>${xe(a.period_key||'')} v${a.version||''}</td><td>${xe(a.note||'')}</td><td class="fin-mut">${(a.files||[]).map(xe).join('<br>')}</td></tr>`).join('')}
+  </tbody></table></div></details>`;
+}
+function finV(){
+  if(!finAnyRole()) return `<div class="page-hd"><div><h1 class="fin-h1">Monthly Financials</h1></div></div><div class="fin-card">Your account doesn't have a financial role (uploader or approver). Contact Brandon.</div>`;
+  if(!FIN.loaded && !FIN.err){ if(!FIN.loading) finLoad(); return `<div class="fin-card">Loading financial uploads…</div>`; }
+  const pending=FIN.subs.filter(s=>s.status==='Pending'&&!s.is_test).length;
+  const lastApproved=FIN.subs.filter(s=>s.status==='Approved'&&!s.is_test).sort((a,b)=>b.last_month.localeCompare(a.last_month))[0];
+  return `<style>${FIN_CSS}</style>
+  <div class="page-hd"><div><h1 class="fin-h1">Monthly Financials</h1>
+    <div class="lede">P&amp;L by Class (base) + the Comptroller's adjustment rows → Comptroller approval → Director Hub and SLG Hub. Only Approved months are published.</div></div>
+    <div class="fin-mut" style="text-align:right">${lastApproved?`Published: <strong>Approved by Comptroller ${finDate(lastApproved.approved_on)} · ${xe(finYmLabel(lastApproved._calc?lastApproved._calc.months[lastApproved._calc.months.length-1].ym:lastApproved.period_key))}</strong>`:'Nothing approved yet'}${pending?`<br>${pending} pending`:''}
+    <div style="margin-top:6px"><button class="btn-g" style="font-size:11px" ${FIN.busy?'disabled':''} onclick="finLoad()">Refresh</button> <button class="btn-g" style="font-size:11px" ${FIN.busy?'disabled':''} title="Rebuilds what Director Hub and SLG Hub read from the Approved months" onclick="finRepublish()">Republish approved</button></div></div></div>
+  <div class="fin-steps"><span><b>Day 3</b> P&amp;Ls final · Brandon uploads (Pending)</span><span><b>Day 4</b> Brandon checks</span><span><b>Day 5</b> Comptroller approves or sends back</span><span><b>Then</b> SLG reviews</span></div>
+  ${FIN.err?`<div class="fin-err">${xe(FIN.err)}</div>`:''}
+  ${FIN.msg?`<div class="${FIN.msg.ok?'fin-okbox':'fin-err'}">${xe(FIN.msg.text)}</div>`:''}
+  ${finBaselineHtml()}
+  ${finUploadHtml()}
+  ${finReviewHtml()}
+  ${finListHtml()}
+  ${finAuditHtml()}`;
+}
+const FIN_CSS=`
+.fin-h1{font-family:'Fraunces',serif;font-weight:400;font-size:28px;color:var(--ink);margin:0}
+.fin-h2{font-family:'Fraunces',serif;font-size:20px;color:var(--ink);margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fin-h3{font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px}
+.fin-card{background:var(--paper);border:1px solid var(--rule);border-radius:3px;padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow)}
+.fin-mut{color:var(--muted);font-size:11.5px;font-weight:400}
+.fin-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;letter-spacing:.02em}
+.fin-tw{overflow-x:auto;margin-top:6px}
+.fin-th{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin:6px 0 4px}
+.fin-th span{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);margin-left:8px}
+.fin-tbl{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+.fin-tbl th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);border-bottom:1px solid var(--rule-strong);padding:7px 8px;background:#faf6ee;white-space:nowrap}
+.fin-tbl td{padding:6px 8px;border-bottom:1px solid var(--rule);white-space:nowrap}
+.fin-tbl .n{text-align:right}
+.fin-tbl tr.fin-sub td{font-weight:600;background:#faf6ee}
+.fin-tbl tr.fin-tot td{font-weight:700;background:#f3f0e6}
+.fin-click tr:hover td{background:#f6f1e4}
+.fin-selrow td{background:#eef1fb !important}
+.fin-good{color:#166534;font-weight:600}.fin-warn{color:#92400E;font-weight:600}.fin-bad{color:#B91C1C;font-weight:600}
+.fin-grid2{display:grid;grid-template-columns:1fr;gap:10px}
+.fin-checks{display:flex;flex-direction:column;gap:6px}
+.fin-check{display:flex;gap:10px;align-items:flex-start;font-size:12.5px}
+.fin-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.fin-cl{font-weight:600;color:var(--ink)}.fin-cd{color:var(--ink-soft);font-size:11.5px;white-space:normal;word-break:break-word}
+.fin-det{margin-top:10px}.fin-det summary{cursor:pointer;font-weight:600;font-size:12.5px;color:#1a2861}
+.fin-ul{font-size:12px;color:var(--ink-soft);line-height:1.6;margin:8px 0 0 18px}
+.fin-err{background:#FEE2E2;border:1px solid #FCA5A5;color:#7F1D1D;border-radius:6px;padding:10px 12px;margin:8px 0;font-size:12.5px}
+.fin-okbox{background:#DCFCE7;border:1px solid #86EFAC;color:#14532D;border-radius:6px;padding:10px 12px;margin:8px 0;font-size:12.5px}
+.fin-warnbox{background:#FFFBEB;border:1px solid #FCD34D;color:#92400E;border-radius:6px;padding:8px 12px;margin:8px 0;font-size:12.5px}
+.fin-note{background:#F5F3FF;border-color:#DDD6FE;color:#4C1D95;font-size:12.5px}
+.fin-steps{display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 14px}
+.fin-steps span{background:#faf6ee;border:1px solid var(--rule);border-radius:14px;padding:4px 10px;font-size:11.5px;color:var(--ink-soft)}
+.fin-up{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:700px){.fin-up{grid-template-columns:1fr}.fin-grid2{grid-template-columns:1fr}}
+.fin-drop{display:flex;flex-direction:column;gap:6px;border:1px dashed var(--rule-strong);border-radius:6px;padding:10px 12px;font-size:12px;font-weight:600;color:var(--ink);background:#fffdf8}
+.fin-drop input{font-size:12px;font-family:inherit;font-weight:400;max-width:100%}
+.fin-ot{font-size:12px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.fin-ot label{display:inline-flex;gap:4px;align-items:center}
+.fin-act textarea{width:100%;box-sizing:border-box}
+.fin-card button:disabled,.page-hd button:disabled{opacity:.4;cursor:not-allowed}
+`;
+
+// ── Upload ──────────────────────────────────────────────────────────────────
+async function finPickFiles(kind, inp){
+  const files=[...inp.files]; inp.value='';
+  if(!files.length) return;
+  FIN.msg=null;
+  FIN.up=FIN.up||{classFiles:[],contractFiles:[]};
+  const key=kind==='class'?'classFiles':'contractFiles';
+  FIN.up[key]=files; FIN.up.plan=null; FIN.up.error=null; FIN.up.parsing=true; render();
+  try{
+    const classMonths=[], tabs=[]; let testHit=false;
+    for(const f of FIN.up.classFiles){
+      const sheets=await parseXlsxNamedSheets(await f.arrayBuffer(), [/.*/]);
+      const rows=Object.values(sheets)[0]; if(!rows||!rows.length) throw new Error(f.name+': no sheet found.');
+      const cm=finParseClassPL(rows, f.name); classMonths.push(cm);
+      if(/\bTEST\b/.test(f.name) || rows.slice(0,4).some(r=>/\bTEST\b/.test(String(r[0]||'')))) testHit=true;
+    }
+    for(const f of FIN.up.contractFiles){
+      const sheets=await parseXlsxNamedSheets(await f.arrayBuffer(), [/^(?!.*transaction)/i]);
+      const t=finParseContractWorkbook(sheets, f.name); tabs.push(...t);
+      if(/\bTEST\b/.test(f.name) || t.some(x=>/\bTEST\b/.test(x.title))) testHit=true;
+    }
+    FIN.up.parsing=false;
+    if(!classMonths.length || !tabs.length){ FIN.up.error = !classMonths.length ? 'Add the P&L by Class file(s) too.' : 'Add the Comptroller’s P&L by Contract file too (it holds his adjustment rows).'; render(); return; }
+    const plan=finPlanSubmissions(classMonths, tabs);
+    const flags={}; classMonths.forEach(m=>{ flags[m.ym]=m.misc.filter(l=>l.suggested).map(l=>l.name); });
+    FIN.up.plan=plan; FIN.up.flags=flags; FIN.up.forcedTest=testHit; FIN.up.isTest=testHit;
+    finRecomputeUpload();
+  }catch(e){ FIN.up.parsing=false; FIN.up.error=e.message||String(e); }
+  render();
+}
+function finRecomputeUpload(){ const u=FIN.up; u.computed=u.plan.groups.map(g=>finComputeGroup(g,u.flags)); }
+function finToggleOneTime(ym,name,on){
+  const u=FIN.up; const set=new Set(u.flags[ym]||[]); on?set.add(name):set.delete(name); u.flags[ym]=[...set];
+  finRecomputeUpload(); render();
+}
+async function finSubmit(){
+  const u=FIN.up; if(!u||!u.plan) return;
+  FIN.busy='submit'; FIN.msg=null; render();
+  const done=[]; let lastId=null;
+  try{
+    for(let i=0;i<u.plan.groups.length;i++){
+      const g=u.plan.groups[i], comp=u.computed[i];
+      const files={class:g.months.map(m=>m.fileName), contract:g.tab.fileName};
+      const payload=finSubmissionPayload(g, comp, u.flags, files);
+      const first=g.months[0].ym+'-01', last=g.months[g.months.length-1].ym+'-01';
+      const {data,error}=await dsSb.rpc('fin_submit',{ p_period_key:g.periodKey, p_first:first, p_last:last, p_data:payload,
+        p_class_files:files.class, p_contract_file:files.contract, p_is_test:!!u.isTest, p_name:finActorName() });
+      if(error) throw new Error(`${g.label}: ${error.message}`);
+      done.push(g.label); lastId=data;
+    }
+    if(!FIN.finOnly && typeof recordImport==='function' && !u.isTest){
+      const lastG=u.plan.groups[u.plan.groups.length-1];
+      try{ recordImport('director_pl',{ source_filename:[...u.classFiles,...u.contractFiles].map(f=>f.name).join(', '), row_count:u.plan.groups.reduce((s,g)=>s+g.months.length,0),
+        period_label:done.join(', ')+' (Pending approval)', data_through:lastG.months[lastG.months.length-1].ym }); }catch(e){}
+    }
+    FIN.up=null; FIN.sel=lastId;
+    FIN.msg={ok:true, text:`Submitted ${done.join(', ')} — Pending. The Comptroller approves or sends back on business day 5.`};
+  }catch(e){
+    FIN.msg={ok:false, text:(done.length?`Submitted ${done.join(', ')}; then stopped. `:'')+(e.message||e)};
+  }
+  FIN.busy=null; await finLoad();
+}
+async function finDecide(action){
+  const s=FIN.subs.find(x=>x.id===FIN.sel); if(!s) return;
+  const note=(FIN.note||'').trim();
+  if(action==='send_back' && !note){ FIN.msg={ok:false,text:'Add a note saying what needs fixing, then Send back.'}; render(); return; }
+  if(action==='approve'){
+    const reds=finSubChecks(s).filter(c=>!c.pass && c.kind!=='info').length;
+    if(!confirm(`${reds?reds+' check(s) are red. ':''}Approve ${s.data.label}? Director Hub and SLG Hub will show it right away, and it will be locked.`)) return;
+  }
+  FIN.busy=action; FIN.msg=null; render();
+  const {data,error}=await dsSb.rpc('fin_decide',{ p_id:s.id, p_action:action, p_note:note||null, p_name:finActorName() });
+  FIN.busy=null;
+  if(error) FIN.msg={ok:false,text:error.message};
+  else { FIN.note=''; FIN.msg={ok:true,text: action==='approve' ? `Approved ${s.data.label}. Published: ${data&&data.published&&data.published.period||''}.` : `Sent back ${s.data.label} with your note.`}; }
+  await finLoad();
+}
+async function finRecordBaseline(){
+  const ids=FIN.subs.filter(s=>!s.is_test && s.status==='Pending' && s.last_month<='2026-10-31').map(s=>s.id);
+  if(!confirm(`Record the Comptroller's Nov 13, 2026 approval for Jan–Oct 2026 (${ids.length} uploads)? This publishes them to Director Hub and SLG Hub and locks them.`)) return;
+  FIN.busy='baseline'; FIN.msg=null; render();
+  const {data,error}=await dsSb.rpc('fin_record_baseline',{ p_ids:ids, p_approver_name:FIN_BASELINE.approver, p_approved_on:FIN_BASELINE.approvedOn, p_note:FIN_BASELINE.note, p_name:finActorName() });
+  FIN.busy=null;
+  FIN.msg = error ? {ok:false,text:error.message} : {ok:true,text:`Baseline recorded as Approved by ${FIN_BASELINE.approver} (Nov 13, 2026). Published: ${data&&data.published&&data.published.period||''}.`};
+  await finLoad();
+}
+async function finRepublish(){
+  FIN.busy='publish'; render();
+  const {data,error}=await dsSb.rpc('fin_publish');
+  FIN.busy=null;
+  FIN.msg = error ? {ok:false,text:error.message} : {ok:true,text:`Republished from Approved months: ${data&&data.period||'nothing approved yet'}.`};
+  render();
+}
+
 // ══════════════════════════════════════════════════════════════
 // KLIP BILLING EXPORT + CLINICAL GOALS + LINKAGE U-CODES — moved from Director Hub 9/22/26.
 // parseKlip(), parseClinicalNotesExport(), and parseLinkageUcodeNotes() below are ported
@@ -2007,7 +2840,7 @@ const DATA_CATALOG = [
   {registryKey:'hospital_outcomes', label:'Hospital Outcomes Export', supaKey:'hospital_data', uploadedVia:'Data & Staff Hub', consumers:'Hospital / ThriveED Hub', cadenceDays:30},
   {registryKey:'renewals_workbook', label:'Renewals Workbook', supaKey:'renewals, caseload_snapshots', uploadedVia:'Data & Staff Hub', consumers:'Community/Hospital/Courts renewal tracking; caseload for engagement % (11/9/26)', cadenceDays:7},
   {registryKey:'linkage_legacy_workbook', label:'Legacy Linkage Dashboard Workbook', supaKey:'linkage_data', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub (superseded by Pimsy Notes upload)', cadenceDays:null},
-  {registryKey:'director_pl', label:'QuickBooks P&L by Class', supaKey:'director_financial, director_financial_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub, SLG Hub', cadenceDays:30, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_financial_history, which Director Hub already reads live on every load and promotes into its own "current" snapshot automatically, no Director Hub changes needed. Director Hub’s own upload button was retired 9/23/26 — this is the sole upload path.'},
+  {registryKey:'director_pl', label:'Monthly Financials (P&L by Class + Comptroller’s P&L by Contract)', supaKey:'fin_submissions → director_financial, director_financial_history (Approved months only)', uploadedVia:'Data & Staff Hub → Monthly Financials (11/13/26)', consumers:'Director Hub, SLG Hub', cadenceDays:30, note:'Uploaded on business day 3 as Pending; the Comptroller approves or sends back on day 5. Approval publishes the two appdata keys from Approved months only (fin_publish); nothing else can write them. The upload date here is when files were submitted, not when they were approved.'},
   {registryKey:'director_klip_pimsy', label:'Klip Billing Export', supaKey:'director_pimsy, director_pimsy_history', uploadedVia:'Data & Staff Hub (moved 9/22/26)', consumers:'Director Hub', cadenceDays:7, note:'Upload surface relocated here 9/22/26 — writes new monthly entries straight into director_pimsy_history and (when newer) director_pimsy, which Director Hub already reads live on every load. Director Hub’s own upload button was retired 9/23/26 — this is the sole upload path. Manager attribution still uses the original hardcoded Deb/Muneera fallback rather than this hub’s own live staff roster — Data Hub’s manager keys (Debra, no Muneera) don’t match, so wiring that up is a follow-up, not done here.'},
   {registryKey:'director_clinweekly', label:'Weekly Clinical Goals', supaKey:'director_clinweekly', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Clinical Goals pace view)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, restricted to whichever month is most recent in the file. No confirm step; a toast reports matched/unmatched clinicians on each import.'},
   {registryKey:'director_linkage_ucodes', label:'Linkage U-Code Outcomes', supaKey:'director_linkage_ucodes', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload, added 9/22/26)', consumers:'Director Hub (Linkage U-code outcomes)', cadenceDays:7, note:'No separate upload — computed automatically from the same Notes export as the Pimsy Notes row above, filtered to Linkage-division rows and grouped by month. No confirm step.'},
@@ -2110,7 +2943,7 @@ const UPLOAD_CHECKLIST = [
   {key:'sli_assessments', name:'SLI Screeners', cadence:14, box:'up-sli', from:'Pimsy → Screeners export', feeds:'Flagged Notes Tracker · screener metrics across the hubs'},
   {key:'supervision_tracking', name:'Supervision tracking', cadence:30, box:'up-sup', from:'Supervision Tracking workbook', feeds:'Data & Staff Hub (credential compliance) · Hospital, Courts, Director and Clinical Director Hubs'},
   {key:'hospital_outcomes', name:'Hospital Outcomes', cadence:30, box:'up-hosp', from:'Hospital Outcomes Tracking export', feeds:'Hospital / ThriveED Hub'},
-  {key:'director_pl', name:'QuickBooks P&L by Class', cadence:30, box:'up-pl', from:'QuickBooks → P&L by Class (monthly)', feeds:'Director Hub · SLG Hub'},
+  {key:'director_pl', name:'Monthly Financials', cadence:30, box:'up-pl', from:'QuickBooks P&L by Class + Comptroller’s P&L by Contract (monthly, approved by the Comptroller)', feeds:'Director Hub · SLG Hub'},
   {key:'optum_sla', name:'Optum referral export', cadence:30, box:'up-optum', from:'Optum referral tracker export', feeds:'BH Linkage Hub (Optum SLA) · Director Hub (ROI)'},
   {key:'bd_referrals', name:'BD referral volume', cadence:null, box:'up-bd', from:'BD referral CSV, as needed', feeds:'BD Dashboard'},
 ];
@@ -2146,7 +2979,7 @@ const HUB_DATASETS = {
   sli_assessments:      {name:'SLI screeners', src:'SLI Screeners', cadence:14, box:'up-sli'},
   supervision_tracking: {name:'Supervision & credentials', src:'Supervision tracking', cadence:30, box:'up-sup'},
   hospital_outcomes:    {name:'Hospital outcomes', src:'Hospital Outcomes', cadence:30, box:'up-hosp'},
-  director_pl:          {name:'P&L financials', src:'QuickBooks P&L by Class', cadence:30, box:'up-pl'},
+  director_pl:          {name:'P&L financials', src:'Monthly Financials (Comptroller-approved)', cadence:30, box:'up-pl'},
   optum_sla:            {name:'Optum SLA & disenrollment', src:'Optum referral export', cadence:30, box:'up-optum'},
   bd_referrals:         {name:'Referral volume', src:'BD referral volume', cadence:null, box:'up-bd'},
 };
@@ -3194,29 +4027,9 @@ function modH(){
       </div>`):''}
     </div>
     <div id="up-pl" style="scroll-margin-top:12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:8px;padding:14px 16px;margin-bottom:10px">
-      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">💰 QuickBooks P&amp;L by Class <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Director Hub</span></div>
-      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">Drop QuickBooks' "Profit and Loss by Class" export (.xlsx) — one month per file, or a multi-month export with per-month columns. Reads the same 7 division columns (Community, Hospitals, Linkage, Clinical, Justice Involved, Call Centers, Other) and Administrative overhead Director Hub has always read from this file. Saves straight to the shared financial history Director Hub reads on every load — <strong>this is the only P&amp;L upload path</strong>; Director Hub's old "↑ Refresh P&L Data" button was retired 9/23/26.</div>
-      <input type="file" accept=".xlsx,.xls" onchange="H.slotFilePL(this)" style="font-size:12px;font-family:inherit">
-      ${M.prevPL?(M.prevPL.error?`<div style="background:#FEE2E2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 14px;margin-top:8px"><div style="font-size:12px;color:#7F1D1D;font-weight:700">Couldn't read that file</div><div style="font-size:12px;color:#7F1D1D">${xe(M.prevPL.error)}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">OK</button></div></div>`:(()=>{
-        const parsed = M.prevPL;
-        const months = (parsed.monthly && parsed.monthly.length) ? parsed.monthly : [{period:parsed.period, divisions:parsed.divisions, adminPool:parsed.adminPool, totalRev:parsed.totalRev, adminIncome:parsed.adminIncome, adminCogs:parsed.adminCogs, adminFound:parsed.adminFound}];
-        const divRows = m => QB_DIVISION_TARGETS.map(t=>{
-          const d = m.divisions[t.key];
-          const gm = d.income ? ((d.income-d.cogs)/d.income*100) : 0;
-          return `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${xe(t.name)}</span><span style="font-family:monospace">${fmt$(d.income)} <span style="color:#8089a8">(${gm.toFixed(0)}% GM)</span></span></div>`;
-        }).join('');
-        const monthBlocks = months.map(m=>`<div style="border-bottom:1px solid #f0ece3;padding:6px 0">
-          <div style="font-weight:700;color:#1a2861;margin-bottom:4px">${xe(m.period||'(period not detected)')} <span style="font-weight:400;color:#8089a8">— Total Revenue ${fmt$(m.totalRev)} · Administrative overhead ${fmt$(m.adminPool)}${m.adminFound?` · Administrative income ${fmt$(m.adminIncome)} / COGS ${fmt$(m.adminCogs)}`:' · no Administrative column found'}</span></div>
-          ${divRows(m)}
-        </div>`).join('');
-        return `<div style="background:#fff;border:1px solid #cdc4b2;border-radius:8px;padding:12px 14px;margin-top:8px">
-        <div style="font-size:12px;color:#1a2861;font-weight:700;margin-bottom:6px">Preview — QuickBooks P&amp;L (${months.length} month${months.length!==1?'s':''} found)</div>
-        <div style="font-size:12px;color:#3e4a78;line-height:1.6">${monthBlocks}</div>
-        ${parsed.mismatchWarning?`<div style="font-size:11px;color:#92400E;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:8px 10px;margin-top:8px">⚠ ${xe(parsed.mismatchWarning)}</div>`:''}
-        <div style="font-size:11px;color:#8089a8;margin-top:8px">This replaces (by period) any existing entry for the same month${months.length>1?'s':''} in Director Hub's financial history — a re-upload corrects that month rather than duplicating it. Director Hub decides which month becomes "current" on its own next load; this upload doesn't set that directly.</div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="M.prevPL=null;H.om('data');">Cancel</button><button class="btn-g" style="font-size:11px" title="Adds only the Administrative class's income and COGS to months already on file. Division numbers are not changed." onclick="H.commitPL(true)">Add Administrative figures only</button><button class="btn-n" style="font-size:11px" onclick="H.commitPL()">Confirm Import</button></div>
-      </div>`;
-      })()):''}
+      <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">💰 Monthly Financials <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · business day 3</span></div>
+      <div style="font-size:12px;color:#3e4a78;margin-bottom:8px">The P&amp;L by Class and the Comptroller's P&amp;L by Contract are now uploaded together on the <strong>Monthly Financials</strong> page. Each month stays Pending until the Comptroller approves it; only Approved months reach Director Hub and SLG Hub (11/13/26).</div>
+      ${finIsUploader()?`<button class="btn-n" style="font-size:11px" onclick="H.cm();H.nav('fin')">Open Monthly Financials</button>`:'<div style="font-size:11px;color:#8089a8">Your account doesn’t have the financial uploader role.</div>'}
     </div>
     <div id="up-optum" style="scroll-margin-top:12px;background:#eef6ee;border:1px solid #bfe0bf;border-radius:8px;padding:14px 16px;margin-bottom:10px">
       <div style="font-weight:700;font-size:13px;color:#1a2861;margin-bottom:6px">🔗 Optum SLA &amp; Disenrollment <span style="font-size:10px;color:#8089a8;font-weight:400;text-transform:uppercase;letter-spacing:.04em">Monthly · moved from Linkage Hub</span></div>
@@ -3325,12 +4138,14 @@ function renderHdr(){
   const tc=S.tasks.filter(t=>COMMUNITY_MGRS.includes(t.assignedTo)&&t.status!=='Completed').length;
   const v=S.view,sm=S.selMgr;
   const isActive=(id)=>{if(id.startsWith('manager:'))return v==='manager'&&sm===id.split(':')[1];return v===id;};
-  const GROUPS=[
+  const finPending=FIN.subs.filter(x=>x.status==='Pending'&&!x.is_test).length;
+  const finGroup={label:'Finance',items:[{id:'fin',label:'Monthly Financials',b:finIsApprover()?finPending:0,btype:'warn'}]};
+  const GROUPS=FIN.finOnly ? [finGroup] : [
     {label:'Data & Staff',items:[
       {id:'settings',label:'Staff & Settings'},
       {id:'catalog',label:'Data Catalog'}
     ]}
-  ];
+  ].concat(finAnyRole()?[finGroup]:[]);
   const renderItem=(item)=>{const a=isActive(item.id);const click=item.id.startsWith('manager:')?`H.nav('manager','${item.id.split(':')[1]}')`:`H.nav('${item.id}')`;const dot=item.dot?`<span class="dot" style="background:${item.dot}"></span>`:'<span class="dot"></span>';const badge=item.b>0?`<span style="margin-left:auto;background:${item.btype==='bad'?'rgba(239,68,68,.9)':'rgba(245,158,11,.9)'};color:#fff;border-radius:10px;padding:0 6px;font-size:9.5px;font-weight:600;line-height:15px;font-family:'IBM Plex Mono',monospace">${item.b}</span>`:'';return`<button class="nav-item${a?' active':''}" onclick="${click}">${dot}<span style="flex:1">${item.label}</span>${badge}</button>`;};
   document.getElementById('sidebar').innerHTML=`
     <div class="brand"><div class="text"><div class="mark">Thrive</div><div class="sub">Data & Staff Hub</div></div></div>
@@ -3343,20 +4158,21 @@ function renderHdr(){
   ];
   const currentRole=ROLES.find(r=>r.key===S.role)||ROLES[0];
   const rBtns=ROLES.map(r=>`<button class="${S.role===r.key?'active':''}" onclick="H.setR('${r.key}')"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${r.color};margin-right:8px;vertical-align:middle"></span>${r.label} <span style="color:#8089a8;font-size:11px">· ${r.sub}</span></button>`).join('');
-  const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='catalog'?'Data Catalog':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
+  const wherelabel=v==='vp'?'Community Overview':v==='sarah'?'Community Services':v==='renewals'?'Renewals':v==='tasks'?'Tasks':v==='match'?'Provider Match':v==='settings'?'Staff & Settings':v==='supervision'?'Supervision':v==='resources'?'Resources':v==='catalog'?'Data Catalog':v==='fin'?'Monthly Financials':v==='manager'?(MGR[sm]?.full||'Manager'):'Hub';
   const hSrc=periodForField('hours'),cSrc=periodForField('caseload');const allDates=[hSrc,cSrc].filter(Boolean).sort();const latest=allDates[allDates.length-1]||null;/* FIX (10/29/26): was ||S.period, which showed the hard-coded 2026-04-11 default as if it were real data */function fmt(d){if(!d)return'No data imported yet';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}
   document.getElementById('hdr').innerHTML=`
-    <div class="ctx"><button class="menu-btn" onclick="toggleMobileNav()" aria-label="Menu">☰</button><div class="where">${wherelabel}</div>${SYNC_STATE==='live'?'<span class="pill live" title="Roster and shared data loaded from Supabase on this visit">● Live</span>':SYNC_STATE==='stale'?'<span class="pill seed" title="Couldn\'t reach Supabase — showing the copy saved in this browser. Use Refresh Staffing Data on Staff &amp; Settings.">● Not live · cached copy</span>':'<span class="pill seed" title="Loading live data from Supabase…">○ Connecting…</span>'}</div>
+    <div class="ctx"><button class="menu-btn" onclick="toggleMobileNav()" aria-label="Menu">☰</button><div class="where">${wherelabel}</div>${FIN.finOnly?'':SYNC_STATE==='live'?'<span class="pill live" title="Roster and shared data loaded from Supabase on this visit">● Live</span>':SYNC_STATE==='stale'?'<span class="pill seed" title="Couldn\'t reach Supabase — showing the copy saved in this browser. Use Refresh Staffing Data on Staff &amp; Settings.">● Not live · cached copy</span>':'<span class="pill seed" title="Loading live data from Supabase…">○ Connecting…</span>'}</div>
     <div class="meta" style="position:relative">
       <!-- "Viewing as" picker removed 11/12/26: uploads and notes are now credited to the signed-in person (account menu). -->
-      <span title="Most recent Hours/Caseload period on file" style="font-size:11px;color:${latest?'#cdd4f0':'#f5b8b8'};font-family:'IBM Plex Mono',monospace;display:inline-flex;align-items:center;gap:5px;white-space:nowrap"><span style="width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${latest?'#3cb43c':'#DC2626'}"></span>Data updated: ${fmt(latest)}</span>
-      <button class="btn-t" onclick="H.om('data')">↑ Enter Data</button>
+      ${FIN.finOnly?'':`<span title="Most recent Hours/Caseload period on file" style="font-size:11px;color:${latest?'#cdd4f0':'#f5b8b8'};font-family:'IBM Plex Mono',monospace;display:inline-flex;align-items:center;gap:5px;white-space:nowrap"><span style="width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${latest?'#3cb43c':'#DC2626'}"></span>Data updated: ${fmt(latest)}</span>
+      <button class="btn-t" onclick="H.om('data')">↑ Enter Data</button>`}
       ${(window.ThriveAccount&&DS_USER)?ThriveAccount.chip():''}
     </div>`;
 }
 
 function renderV(){
-  const vs={vp:vpV,sarah:()=>dirV('Sarah'),manager:()=>mgrV(S.selMgr),renewals:renV,tasks:tskV,match:pmV,supervision:supV,resources:resV,settings:setV,catalog:catalogV};
+  const vs={vp:vpV,sarah:()=>dirV('Sarah'),manager:()=>mgrV(S.selMgr),renewals:renV,tasks:tskV,match:pmV,supervision:supV,resources:resV,settings:setV,catalog:catalogV,fin:finV};
+  if(FIN.finOnly) S.view='fin';
   document.getElementById('view').innerHTML=(vs[S.view]||vpV)();
   enhanceTables();
 }
@@ -8795,6 +9611,7 @@ async delSRow(enc){
   // shared by every upload in this file, not something new introduced here.
   _plCommitChain: Promise.resolve(),
   commitPL(adminOnly){
+    M.prevPL=null; H.nav('fin'); return; // moved to Monthly Financials (11/13/26)
     if(!M.prevPL || M.prevPL.error) return;
     const parsed = M.prevPL;
     parsed._adminOnly = !!adminOnly;
@@ -8807,6 +9624,9 @@ async delSRow(enc){
     return H._plCommitChain;
   },
   async _commitPLNow(parsed){
+    // Retired 11/13/26: director_financial_history is written only from Comptroller-approved
+    // months (Monthly Financials page → fin_publish in Supabase). Kept unreachable for reference.
+    showSaveError('The P&L upload moved to the Monthly Financials page (Finance → Monthly Financials).'); return;
     const newEntries = (parsed.monthly && parsed.monthly.length)
       ? parsed.monthly.map(m=>plHistoryEntryFor(m.period, m.divisions, m.adminPool, m.totalRev, m))
       : [plHistoryEntryFor(parsed.period, parsed.divisions, parsed.adminPool, parsed.totalRev, parsed)];
@@ -10268,8 +11088,13 @@ async function dsLookupReviewer(userId){
     return (error||!data)?null:data;
   }catch(e){ return null; }
 }
-async function dsAfterSignIn(reviewer){
+async function dsAfterSignIn(reviewer, finOnly){
   DS_USER=reviewer;
+  // Monthly Financials (11/13/26): app_roles fin_uploader / fin_approver. The Comptroller signs in
+  // with only the approver role: he sees the Monthly Financials page and nothing else, and none of
+  // the hub's staff/roster data is loaded for him.
+  if(finOnly){ FIN.finOnly=true; S.view='fin'; dsHideGate(); render(); await finLoad(); return; }
+  if(!FIN.roles.length) await finLoadRoles();
   // Keep a remembered roster unlock only if this account is still allowlisted.
   if(S.editUnlocked){
     if(!EDIT_ALLOWLIST.includes((reviewer.email||'').toLowerCase())) dsRelock();
@@ -10278,6 +11103,7 @@ async function dsAfterSignIn(reviewer){
   dsHideGate();
   render();
   try{ await syncFromSupabase(); }catch(e){ console.warn('[dsAfterSignIn] sync failed',e); }
+  if(finAnyRole()) finLoad();
 }
 async function dsHandleLogin(){
   const email=(document.getElementById('dsLoginEmail').value||'').trim();
@@ -10292,6 +11118,11 @@ async function dsHandleLogin(){
   try{ ({data,error}=await withTimeout(dsSb.auth.signInWithPassword({email,password}),15000)); }catch(e){ error=e; }
   if(error){ dsLoginErr('Sign-in failed: '+error.message); reset(); return; }
   const reviewer=await dsLookupReviewer(data.user.id);
+  await finLoadRoles();
+  if((!reviewer || !dsCanView(reviewer)) && finAnyRole()){
+    document.getElementById('dsLoginPassword').value=''; reset();
+    await dsAfterSignIn({ name: FIN.roleName || (reviewer&&reviewer.name) || email, email, role:'finance' }, true); return;
+  }
   if(!reviewer){
     dsLoginErr('Signed in, but no reviewer profile is set up for this account. Contact Brandon to be added to the reviewers table.');
     try{ await dsSb.auth.signOut(); }catch(e){}
@@ -10316,7 +11147,9 @@ async function dsSignOut(){
   try{ const {data}=await dsSb.auth.getSession(); session=data&&data.session; }catch(e){}
   if(session){
     const reviewer=await dsLookupReviewer(session.user.id);
+    await finLoadRoles();
     if(reviewer && dsCanView(reviewer)){ await dsAfterSignIn(reviewer); return; }
+    if(finAnyRole()){ await dsAfterSignIn({ name: FIN.roleName || (reviewer&&reviewer.name) || session.user.email, email: session.user.email, role:'finance' }, true); return; }
   }
   dsRelock();
   dsShowGate();
