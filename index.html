@@ -1493,8 +1493,15 @@ function finParseContractSheet(rows, sheetName, fileName){
   let title=null, titleRow=-1;
   for(let r=0;r<Math.min(rows.length,8)&&!title;r++) (rows[r]||[]).forEach(v=>{ if(!title && /p\s*&\s*l by contract/i.test(finTxt(v))){ title=finTxt(v); titleRow=r; } });
   if(!title) return null;
-  const months=finParseContractTitle(title.replace(/\s*p\s*&\s*l by contract.*$/i,''));
+  let months=finParseContractTitle(title.replace(/\s*p\s*&\s*l by contract.*$/i,''));
   if(!months) throw new Error(`${fileName}, tab "${sheetName}": couldn't read the period from "${title}".`);
+  // Eric's June–August 2026 files keep his figures on a tab named "Amounts" that is cumulative
+  // year to date, even though the title names one month (confirmed: the August "Amounts" tab
+  // equals his Jan–Aug tab). Read it as January through the title month.
+  let ytd=false;
+  if(/^amounts$/i.test(String(sheetName).trim()) && months.length===1){
+    const [y,m]=months[0].split('-').map(Number); months=[]; for(let k=1;k<=m;k++) months.push(finYm(y,k)); ytd=true;
+  }
   let nameRow=-1;
   for(let r=titleRow+1;r<Math.min(rows.length,titleRow+15);r++){
     const t=(rows[r]||[]).map(finTxt);
@@ -1530,7 +1537,7 @@ function finParseContractSheet(rows, sheetName, fileName){
   if(missing.length) throw new Error(`${fileName}, tab "${sheetName}": missing adjustment row(s): ${missing.map(k=>FIN_ADJ_LABELS[k]).join(', ')}.`);
   const totals={}; Object.keys(adj).forEach(k=>totals[k]=Object.values(adj[k]).reduce((s,v)=>s+v,0));
   const naccho=Object.entries(byContract.rev).filter(([n])=>/naccho/i.test(n)).reduce((s,[,v])=>s+v,0);
-  return { sheet:sheetName, fileName, title, months, key:finPeriodKey(months), label:finRangeLabel(months), adj, byContract, totals, naccho, rowLabels:found };
+  return { sheet:sheetName, fileName, title, months, key:finPeriodKey(months), label:finRangeLabel(months)+(ytd&&months.length>1?' (year to date)':''), ytd, adj, byContract, totals, naccho, rowLabels:found };
 }
 function finParseContractWorkbook(sheets, fileName){
   const tabs=[];
@@ -1540,7 +1547,21 @@ function finParseContractWorkbook(sheets, fileName){
 }
 
 // ── Pair class months with adjustment tabs → one submission per period ────────
-function finPlanSubmissions(classMonths, contractTabs){
+function finSubtractTab(b, a){
+  // b covers a's months plus later ones (both start the same month): b − a = the later months.
+  const months=b.months.filter(m=>!a.months.includes(m));
+  const d={ sheet:`${b.sheet} − ${a.sheet}`, fileName:`${b.fileName} minus ${a.fileName}`, title:`${finRangeLabel(b.months)} minus ${finRangeLabel(a.months)}`,
+            months, key:finPeriodKey(months), label:finRangeLabel(months), derived:{from:finRangeLabel(b.months), minus:finRangeLabel(a.months)}, src:[b.key,a.key],
+            adj:{}, byContract:{}, totals:{}, naccho:(b.naccho||0)-(a.naccho||0) };
+  Object.keys(FIN_ADJ_KEYS).forEach(k=>{
+    d.adj[k]={}; d.byContract[k]={};
+    new Set([...Object.keys(b.adj[k]),...Object.keys(a.adj[k])]).forEach(x=>{ const v=(b.adj[k][x]||0)-(a.adj[k][x]||0); if(Math.abs(v)>0.004) d.adj[k][x]=v; });
+    new Set([...Object.keys(b.byContract[k]),...Object.keys(a.byContract[k])]).forEach(x=>{ const v=(b.byContract[k][x]||0)-(a.byContract[k][x]||0); if(Math.abs(v)>0.004) d.byContract[k][x]=v; });
+    d.totals[k]=(b.totals[k]||0)-(a.totals[k]||0);
+  });
+  return d;
+}
+function finPlanSubmissions(classMonths, contractTabs, existingBlockKeys){
   const warnings=[];
   const byYm={}; classMonths.forEach(m=>{ if(byYm[m.ym]) throw new Error(`${m.label} was uploaded twice (${byYm[m.ym].fileName} and ${m.fileName}).`); byYm[m.ym]=m; });
   const tabs={};
@@ -1548,27 +1569,53 @@ function finPlanSubmissions(classMonths, contractTabs){
     const prev=tabs[t.key];
     if(prev){
       const diff=Object.keys(t.totals).some(k=>Math.abs(t.totals[k]-prev.totals[k])>0.5);
-      if(diff) warnings.push(`Two P&L by Contract files have different ${t.label} adjustments (${prev.fileName} vs ${t.fileName}). Using ${t.fileName}.`);
+      if(diff) warnings.push(`Two P&L by Contract files have different ${finRangeLabel(t.months)} adjustments (${prev.fileName} vs ${t.fileName}). Using ${t.fileName}.`);
     }
     tabs[t.key]=t; // later files win
   });
-  const yms=Object.keys(byYm).sort(); const used=new Set(); const groups=[];
-  let i=0;
-  while(i<yms.length){
-    const start=yms[i];
-    const cands=Object.values(tabs).filter(t=>t.months[0]===start && t.months.every(m=>byYm[m]));
-    if(!cands.length){
-      const partial=Object.values(tabs).find(t=>t.months.includes(start));
-      throw new Error(partial
-        ? `${finYmLabel(start)}: the Comptroller's adjustments for it come as one block (${partial.label}). Upload the P&L by Class for every month in that block together.`
-        : `No P&L by Contract tab covers ${finYmLabel(start)}. Add the Comptroller's P&L by Contract for that month.`);
-    }
-    cands.sort((a,b)=>b.months.length-a.months.length);
-    const t=cands[0]; used.add(t.key);
-    groups.push({ months:t.months.map(m=>byYm[m]), tab:t, periodKey:t.key, label:t.label });
-    i+=t.months.length;
+  // Nested tabs that start the same month (e.g. Jan–Jun, Jan–Jul, Jan–Aug) give the later months
+  // on their own by subtraction (Jul = Jan–Jul − Jan–Jun). A tab Eric made for that span wins.
+  const byStart={};
+  Object.values(tabs).filter(t=>!t.derived && t.months.length>1).forEach(t=>{ (byStart[t.months[0]]=byStart[t.months[0]]||[]).push(t); });
+  Object.values(byStart).forEach(list=>{
+    list.sort((a,b)=>a.months.length-b.months.length);
+    for(let k=1;k<list.length;k++){ const d=finSubtractTab(list[k],list[k-1]); if(!tabs[d.key]) tabs[d.key]=d; }
+  });
+  // Choose the finest split of the uploaded months into adjustment periods (most periods wins).
+  const yms=Object.keys(byYm).sort();
+  const fits=Object.values(tabs).filter(t=>t.months.every(m=>byYm[m]));
+  const best=new Array(yms.length+1).fill(null); best[yms.length]={n:0,pick:[]};
+  for(let i=yms.length-1;i>=0;i--){
+    fits.filter(t=>t.months[0]===yms[i] && yms.slice(i,i+t.months.length).join()===t.months.join()).forEach(t=>{
+      const rest=best[i+t.months.length]; if(!rest) return;
+      const cand={n:rest.n+1, pick:[t].concat(rest.pick)};
+      if(!best[i] || cand.n>best[i].n || (cand.n===best[i].n && !t.derived && best[i].pick[0].derived)) best[i]=cand;
+    });
   }
-  const unused=Object.values(tabs).filter(t=>!used.has(t.key)).map(t=>t.label);
+  if(!best[0]){
+    const miss=yms.find((ym,i)=>!fits.some(t=>t.months[0]===ym)) || yms[0];
+    const partial=Object.values(tabs).find(t=>t.months.includes(miss));
+    throw new Error(partial
+      ? `${finYmLabel(miss)}: the Comptroller's adjustments for it come as one block (${partial.label}). Upload the P&L by Class for every month in that block together.`
+      : `No P&L by Contract tab covers ${finYmLabel(miss)}. Add the Comptroller's P&L by Contract for that month.`);
+  }
+  const used=new Set();
+  let groups=best[0].pick.map(t=>{ used.add(t.key); (t.src||[]).forEach(k=>used.add(k)); return { months:t.months.map(m=>byYm[m]), tab:t, periodKey:t.key, label:finRangeLabel(t.months) }; });
+  // Finer periods that exactly cover a block already on file become ONE upload with the block's
+  // period: a corrected version of it that the Comptroller re-approves (the block stays live until then).
+  (existingBlockKeys||[]).forEach(key=>{
+    const [a,b]=key.split('..'); if(!b) return;
+    const idx=groups.findIndex(g=>g.months[0].ym===a); if(idx<0) return;
+    let j=idx; const run=[];
+    while(j<groups.length){ run.push(groups[j]); const last=groups[j].months[groups[j].months.length-1].ym; if(last>=b) break; j++; }
+    const lastYm=run[run.length-1].months[run[run.length-1].months.length-1].ym;
+    if(lastYm!==b || run.length<2) return;
+    const parts=run.map(g=>({months:g.months, tab:g.tab}));
+    const merged={ months:run.flatMap(g=>g.months), tab:null, parts, periodKey:key, label:finRangeLabel(run.flatMap(g=>g.months.map(m=>m.ym))), correction:true };
+    groups.splice(idx, run.length, merged);
+    warnings.push(`${merged.label}: split into ${parts.map(p=>finRangeLabel(p.months.map(m=>m.ym))).join(' + ')}. This replaces the ${merged.label} block on file as a new version; the Comptroller approves it and the block stays live until then.`);
+  });
+  const unused=Object.values(tabs).filter(t=>!used.has(t.key) && !t.derived).map(t=>t.label);
   return { groups, warnings, unusedTabs:unused };
 }
 
@@ -1657,10 +1704,35 @@ function finSumMonths(months){
   const divNet=FIN_DIVS.reduce((s,d)=>s+divs[d.key].net,0);
   return Object.assign(t,{ divisions:divs, divRev, divNet, companyNet:divNet+t.adminIncome, months:months.map(m=>m.ym) });
 }
+function finCombineTabs(tabs, label){
+  const c={ sheet:tabs.map(t=>t.sheet).join(', '), fileName:[...new Set(tabs.map(t=>t.fileName))].join(', '), label, months:tabs.flatMap(t=>t.months),
+            adj:{}, byContract:{}, totals:{}, naccho:tabs.reduce((s,t)=>s+(t.naccho||0),0) };
+  Object.keys(FIN_ADJ_KEYS).forEach(k=>{ c.adj[k]={}; c.byContract[k]={}; c.totals[k]=0;
+    tabs.forEach(t=>{ Object.entries(t.adj[k]).forEach(([d,v])=>{ c.adj[k][d]=(c.adj[k][d]||0)+v; }); Object.entries(t.byContract[k]).forEach(([n,v])=>{ c.byContract[k][n]=(c.byContract[k][n]||0)+v; }); c.totals[k]+=t.totals[k]; }); });
+  return c;
+}
+// A group is one or more "parts"; each part is a run of months with one adjustment tab applied
+// to its last month. basis per month: 'month' = own tab; 'block' = last month of a multi-month
+// part (carries it); 'none' = earlier months of that part (Class figures only).
+function finGroupParts(group){
+  if(group.parts) return group.parts;
+  if(group.tabsByMonth) return group.months.map(m=>({months:[m], tab:group.tabsByMonth[m.ym]}));
+  return [{months:group.months, tab:group.tab}];
+}
 function finComputeGroup(group, oneTimeFlags){
-  const n=group.months.length;
-  const months=group.months.map((cm,i)=>finComputeMonth(cm, i===n-1?group.tab:null, (oneTimeFlags||{})[cm.ym]));
-  return { periodKey:group.periodKey, label:group.label, months, total:finSumMonths(months), tab:group.tab };
+  const parts=finGroupParts(group); const months=[];
+  parts.forEach(p=>{
+    const n=p.months.length;
+    p.months.forEach((cm,i)=>{
+      const m=finComputeMonth(cm, i===n-1?p.tab:null, (oneTimeFlags||{})[cm.ym]);
+      m.basis = n===1 ? 'month' : (i===n-1 ? 'block' : 'none');
+      if(n>1 && i===n-1) m.blockNote=`Carries the Comptroller's ${finRangeLabel(p.months.map(x=>x.ym))} adjustments as one block; ${finYmShort(p.months[0].ym)}–${finYmShort(p.months[n-2].ym)} show Class figures only.`;
+      months.push(m);
+    });
+  });
+  const tab = group.tab || finCombineTabs(parts.map(p=>p.tab), group.label);
+  const partInfo = parts.map(p=>({label:finRangeLabel(p.months.map(x=>x.ym)), months:p.months.length, sheet:p.tab.sheet, fileName:p.tab.fileName, derived:p.tab.derived||null}));
+  return { periodKey:group.periodKey, label:group.label, months, total:finSumMonths(months), tab, parts:partInfo, isBlock: parts.some(p=>p.months.length>1) };
 }
 // History entry Director Hub / SLG Hub read (director_financial_history). Approval is stamped on publish.
 function finHistoryEntry(m, blockNote){
@@ -1671,23 +1743,25 @@ function finHistoryEntry(m, blockNote){
   const e={ period:m.label, ym:m.ym, updated:new Date().toISOString().slice(0,10), adminPool:m.pool, totalRev:m.divRev, divisions,
             adminClass:{ income:m.adminIncome, cogs:m.adminCogs, cogsInPool:true, oneTimeExcluded:m.oneTimeTotal||0 },
             overhead:{ adminCogs:m.adminCogs, adminExpense:m.adminExpense, total:m.pool },
-            rules:'comptroller-2026-11-13' };
+            rules:'comptroller-2026-11-13', adjBasis:m.basis||'month' };
   if(blockNote) e.adjustmentsNote=blockNote;
   return e;
 }
 function finSubmissionPayload(group, computed, oneTimeFlags, files){
-  const n=computed.months.length;
-  const blockNote = n>1 ? `Carries the Comptroller's ${group.label} adjustments as one block; ${finYmShort(computed.months[0].ym)}–${finYmShort(computed.months[n-2].ym)} show Class figures only.` : null;
   return {
     schema:1, rules:'comptroller-2026-11-13', periodKey:group.periodKey, label:group.label,
     months:group.months, adjustments:group.tab, oneTimeFlags:Object.fromEntries(group.months.map(m=>[m.ym,[...((oneTimeFlags||{})[m.ym]||[])]])),
-    entries:computed.months.map((m,i)=>finHistoryEntry(m, (n>1&&i===n-1)?blockNote:null)),
+    adjustmentParts: group.parts ? group.parts.map(p=>({months:p.months.map(m=>m.ym), tab:p.tab})) : null,
+    adjustmentsByMonth: group.tabsByMonth||null,
+    entries:computed.months.map(m=>finHistoryEntry(m, m.blockNote||null)),
     files, computedAt:new Date().toISOString(),
   };
 }
 // Rebuild computed months from a stored submission (so the approval screen always shows the same math).
 function finRecompute(data){
-  const g={ months:data.months, tab:data.adjustments, periodKey:data.periodKey, label:data.label };
+  const byYm={}; (data.months||[]).forEach(m=>{ byYm[m.ym]=m; });
+  const parts = data.adjustmentParts ? data.adjustmentParts.map(p=>({months:p.months.map(ym=>byYm[ym]), tab:p.tab})) : null;
+  const g={ months:data.months, tab:data.adjustments, parts, tabsByMonth:data.adjustmentsByMonth||null, periodKey:data.periodKey, label:data.label };
   return finComputeGroup(g, data.oneTimeFlags||{});
 }
 
@@ -1827,10 +1901,10 @@ function finSubChecks(sub){
   const checks=finChecks(sub._calc, prior?prior.m:null);
   const swing=checks.find(c=>c.id==='swing');
   const priorEntry = prior && (prior.sub.data.entries||[]).find(e=>e.ym===prior.m.ym);
-  if(swing && priorEntry && priorEntry.adjustmentsNote && sub._calc.months.length===1){
+  if(swing && priorEntry && (priorEntry.adjBasis||(priorEntry.adjustmentsNote?'block':'month'))==='block' && !sub._calc.isBlock){
     swing.pass=true; swing.kind='info';
     swing.detail=`Not compared: ${finYmShort(prior.m.ym)} carries the Comptroller's whole ${prior.sub.data.label} adjustment block, so a month-to-month swing would be misleading. YTD is exact.`;
-  } else if(swing && sub._calc.months.length>1){
+  } else if(swing && sub._calc.isBlock){
     swing.kind='info';
     swing.label+=' (informational for a multi-month block: the adjustments land in the last month)';
   }
@@ -1875,7 +1949,8 @@ function finAdjHtml(calc){
   const cs=tot.caresource.amount ? Object.entries(tot.caresource.split).map(([k,v])=>`${xe(FIN_DIVS.find(d=>d.key===k).name)} ${finFmt(v)}`).join(' · ') : null;
   const oneTime=calc.months.flatMap(m=>(m.oneTimeItems||[]).map(o=>`${finYmShort(m.ym)}: ${xe(o.name)} ${finFmt(o.total)}`));
   return `<details class="fin-det"><summary>Rules applied: adjustments, CareSource, one-time items, Hospitals Admin</summary>
-    <div class="fin-mut" style="margin:6px 0 8px">Comptroller's adjustment rows from <strong>${xe(tab.fileName||'')}</strong>, tab “${xe(tab.sheet)}” (${xe(tab.label)})${calc.months.length>1?`, applied to ${xe(finYmLabel(last.ym))} as one block`:''}. The Contract file's own revenue and COGS are not used.</div>
+    <div class="fin-mut" style="margin:6px 0 8px">Comptroller's adjustment rows (the Contract file's own revenue and COGS are not used):
+      <ul class="fin-ul" style="margin-top:4px">${(calc.parts||[]).map(p=>`<li><strong>${xe(p.label)}</strong>${p.months>1?' — one block, applied to its last month':''}: ${p.derived?`${xe(p.derived.from)} minus ${xe(p.derived.minus)} (year-to-date tabs)`:`tab “${xe(p.sheet)}”`} · ${xe(p.fileName||'')}</li>`).join('')}</ul></div>
     <table class="fin-tbl"><thead>${head}</thead><tbody>${body}</tbody></table>
     <ul class="fin-ul">
       <li>NACCHO (Thrive for Change contract) excluded from Justice: ${finFmt(tab.naccho||0)}.</li>
@@ -1922,8 +1997,8 @@ function finUploadHtml(){
       const otRows=g.months.filter(m=>m.misc.length).map(m=>`<div class="fin-ot"><strong>${xe(finYmShort(m.ym))}</strong> ${m.misc.map(l=>{ const on=(u.flags[m.ym]||[]).includes(l.name);
         return `<label><input type="checkbox" ${on?'checked':''} onchange="finToggleOneTime('${m.ym}',${JSON.stringify(l.name).replace(/"/g,'&quot;')},this.checked)"> ${xe(l.name)} ${finFmt(l.total,2)}</label>`; }).join('')}</div>`).join('');
       return `<div class="fin-card" style="margin:10px 0 0">
-        <div class="fin-h3">${xe(g.label)} <span class="fin-mut">→ ${g.months.length} Class file${g.months.length>1?'s':''} + adjustments tab “${xe(g.tab.sheet)}” of ${xe(g.tab.fileName)}</span></div>
-        ${finTable(comp.total, g.months.length>1?'Block total':'This month', '')}
+        <div class="fin-h3">${xe(g.label)} <span class="fin-mut">→ ${g.months.length} Class file${g.months.length>1?'s':''} + adjustments: ${comp.parts.map(p=>xe(p.label)+(p.derived?' (derived: '+xe(p.derived.from)+' − '+xe(p.derived.minus)+')':'')).join(' · ')}</span></div>
+        ${finTable(comp.total, g.months.length>1?'Period total':'This month', '')}
         <div class="fin-mut" style="margin-top:8px">One-time items (excluded from operating and division revenue). Suggested ones are pre-ticked; change them if needed.</div>${otRows||'<div class="fin-mut">No miscellaneous income lines.</div>'}
       </div>`; }).join('');
     preview=`${u.plan.warnings.map(w=>`<div class="fin-warnbox">${xe(w)}</div>`).join('')}
@@ -1987,7 +2062,7 @@ function finReviewHtml(){
     <div class="fin-mut">Uploaded by ${xe(s.uploaded_by_name||'—')}, ${finDateTime(s.uploaded_at)} · Files: ${files.map(xe).join(' · ')}</div>
     ${state}
     <div class="fin-grid2">
-      ${finTable(calc.total, multi?`${xe(s.data.label)} (block)`:`${xe(s.data.label)} (month)`, '')}
+      ${finTable(calc.total, calc.isBlock?`${xe(s.data.label)} (block)`:multi?`${xe(s.data.label)} (period)`:`${xe(s.data.label)} (month)`, '')}
       ${finTable(ytd, `YTD ${xe(finYmShort(from))} – ${xe(finYmShort(to))}`, pendingIncluded.length?`includes pending ${pendingIncluded.length>2?finYmShort(pendingIncluded[0])+' – '+finYmShort(pendingIncluded[pendingIncluded.length-1]):pendingIncluded.map(finYmShort).join(', ')}`:'')}
     </div>
     ${monthly}
@@ -2086,7 +2161,8 @@ async function finPickFiles(kind, inp){
     }
     FIN.up.parsing=false;
     if(!classMonths.length || !tabs.length){ FIN.up.error = !classMonths.length ? 'Add the P&L by Class file(s) too.' : 'Add the Comptroller’s P&L by Contract file too (it holds his adjustment rows).'; render(); return; }
-    const plan=finPlanSubmissions(classMonths, tabs);
+    const blockKeys=FIN.subs.filter(x=>!x.is_test && /\.\./.test(x.period_key) && (x.status==='Approved'||x.status==='Pending')).map(x=>x.period_key);
+    const plan=finPlanSubmissions(classMonths, tabs, [...new Set(blockKeys)]);
     const flags={}; classMonths.forEach(m=>{ flags[m.ym]=m.misc.filter(l=>l.suggested).map(l=>l.name); });
     FIN.up.plan=plan; FIN.up.flags=flags; FIN.up.forcedTest=testHit; FIN.up.isTest=testHit;
     finRecomputeUpload();
@@ -2105,7 +2181,8 @@ async function finSubmit(){
   try{
     for(let i=0;i<u.plan.groups.length;i++){
       const g=u.plan.groups[i], comp=u.computed[i];
-      const files={class:g.months.map(m=>m.fileName), contract:g.tab.fileName};
+      const cf=new Set(); finGroupParts(g).forEach(p=>String(p.tab.fileName||'').split(' minus ').forEach(f=>cf.add(f)));
+      const files={class:g.months.map(m=>m.fileName), contract:[...cf].join(', ')};
       const payload=finSubmissionPayload(g, comp, u.flags, files);
       const first=g.months[0].ym+'-01', last=g.months[g.months.length-1].ym+'-01';
       const {data,error}=await dsSb.rpc('fin_submit',{ p_period_key:g.periodKey, p_first:first, p_last:last, p_data:payload,
