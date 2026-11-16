@@ -2935,6 +2935,7 @@ const DATA_CATALOG = [
 // Either file works alone; upload both together for the full picture (see the merge in readUkgFiles). Produces, per staff member and pay period, the old workbook's "Hours for
 // Calculation" (formula copied from the 2025 tabs):
 //   Full-time:          80 + overtime − admin/meeting hours − PTO − floating holiday
+//                       − 8 hours for each observed weekday holiday in the pay period (11/16/26)
 //   Part-time / split:  regular (non-admin) hours + overtime + holiday worked 1.0 + 1.5
 // Productivity % = billable hours (from Pimsy) ÷ Hours for Calculation. Stored in pd under the
 // pay period's end date (from the report's Counter Date) as hfc / pto / ot / adminHrs.
@@ -2971,15 +2972,19 @@ function ukgParse(rows){
   const kind = /vlookup/i.test(title) ? 'all' : 'adult';
   return {start, end, kind, emp};
 }
-function ukgHoursForCalc(e){
+function ukgHoursForCalc(e, holidays){
   const r2 = n => Math.round(n*100)/100;
   const ft = /full-?time/i.test(e.type);
   // Part-time/split: regular hours on the adult (Community) cost centers, as the old adult-only
   // report gave — a split employee's other-program hours shouldn't count. Staff with no adult
   // cost center (grant programs) use all their non-admin regular hours.
   const reg = e.adultReg > 0 ? e.adultReg : e.otherReg;
-  const hfc = ft ? 80 + e.ot - e.adminReg - e.pto - e.flt : reg + e.ot + e.h1 + e.h15;
-  return {hfc:r2(Math.max(0,hfc)), pto:r2(e.pto), ot:r2(e.ot), adminHrs:r2(e.adminReg), ft};
+  // 11/16/26 — a holiday doesn't count against anyone: full-time starts from 80 fixed hours, so
+  // take 8 off per observed weekday holiday. Part-time is built from hours actually worked, so a
+  // holiday not worked is already left out and nothing more is subtracted.
+  const hol = ft ? 8*(holidays||0) : 0;
+  const hfc = ft ? 80 + e.ot - e.adminReg - e.pto - e.flt - hol : reg + e.ot + e.h1 + e.h15;
+  return {hfc:r2(Math.max(0,hfc)), pto:r2(e.pto), ot:r2(e.ot), adminHrs:r2(e.adminReg), hol, ft};
 }
 async function readUkgFiles(files){
   const parsed = [];
@@ -2999,7 +3004,7 @@ async function readUkgFiles(files){
   const matched=[], unmatched=[];
   Object.entries(src.emp).forEach(([id,e])=>{
     const s = byId[+id];
-    const v = ukgHoursForCalc(e);
+    const v = ukgHoursForCalc(e, (src.start && src.end) ? crHolidaysIn(src.start, src.end) : 0);
     if(s) matched.push({id:+id, name:s.fn+' '+s.ln, ...v}); else unmatched.push(`${e.name} (ID ${id})`);
   });
   return {start:src.start, end:src.end, kind:src.kind, files:parsed.map(p=>p.name), matched, unmatched};
@@ -5590,6 +5595,17 @@ const CR_SNAPSHOTS_KEPT = 8;
 // Periods ending on/after this date only ever come from this computation (the report uploads
 // were retired), so a partial result there can be safely cleared when a gap is found.
 const CR_RAW_SINCE = '2026-10-24';
+// Holidays (added 11/16/26, per Brandon) — direct-service observed holidays that fall on a weekday,
+// from the "2026 Holiday Schedule". Rule: a holiday doesn't count against anyone — it isn't a
+// workday for pace or goals, and a day with no notes on a holiday isn't a gap. Anyone who works it
+// keeps the hours they bill (the 1.5 is pay, handled in payroll). Easter (Sun 4/5) and July 4
+// (Sat) are observed but fall on a weekend, so they change nothing here. Admin-only days (7/3,
+// 12/24, 12/31) are left out on purpose. ADD NEXT YEAR'S DATES HERE AND IN THE COMMUNITY HUB
+// (community.html, THRIVE_HOLIDAYS) when the new schedule comes out.
+const CR_HOLIDAYS = new Set(['2026-01-01','2026-05-25','2026-09-07','2026-11-26','2026-11-27','2026-12-25']);
+function crIsWorkday(iso){ const w=new Date(iso+'T00:00:00Z').getUTCDay(); return w>=1 && w<=5 && !CR_HOLIDAYS.has(iso); }
+function crWorkdaysIn(a,b){ let n=0; for(let d=a; d<=b; d=crAddDays(d,1)) if(crIsWorkday(d)) n++; return n; }
+function crHolidaysIn(a,b){ let n=0; for(let d=a; d<=b; d=crAddDays(d,1)){ const w=new Date(d+'T00:00:00Z').getUTCDay(); if(w>=1 && w<=5 && CR_HOLIDAYS.has(d)) n++; } return n; }
 const CR_NONBILLABLE = new Set(['non-billable','nonbillable','admin','otr- linkage','otr-linkage','ctp admin','ctp engagement','ctp in-reach','itp','phone','none','']);
 function crCode(raw){
   const s = String(raw==null?'':raw).trim();
@@ -5602,7 +5618,7 @@ function crIsEngagement(code){ return /^H003[68]\b/i.test(code); }
 // Org-wide, every weekday has notes, so a missing weekday means that stretch was never uploaded.
 function crMissingWeekdays(daySet, ws, we){
   const miss = [];
-  for(let d=ws; d<=we; d=crAddDays(d,1)){ const w=new Date(d+'T00:00:00Z').getUTCDay(); if(w>=1 && w<=5 && !daySet.has(d)) miss.push(d); }
+  for(let d=ws; d<=we; d=crAddDays(d,1)){ if(crIsWorkday(d) && !daySet.has(d)) miss.push(d); }
   return miss;
 }
 function crAddDays(iso, n){ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
@@ -5665,8 +5681,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
     const ps = start, pe = crAddDays(start, 13);
     let through = maxD < todayISO ? maxD : crAddDays(todayISO, -1);
     if(through > pe) through = pe;
-    const wdCount = (a,b) => { let n=0; for(let d=a; d<=b; d=crAddDays(d,1)){ const w=new Date(d+'T00:00:00Z').getUTCDay(); if(w>=1 && w<=5) n++; } return n; };
-    const wd = through >= ps ? wdCount(ps, through) : 0;
+    const wd = through >= ps ? crWorkdaysIn(ps, through) : 0;   // holidays aren't workdays
     if(wd > 0 && minD <= ps){
       const miss = crMissingWeekdays(daySet, ps, through);
       if(miss.length) gapNote('Pay period to date', ps, through, miss);
@@ -5676,9 +5691,15 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
           rows.forEach(r=>{ if(r.d<a || r.d>b) return; const id=staffOf(r.by); if(id==null || (hoursStaff && !hoursStaff.has(id))) return; mins[id]=(mins[id]||0) + (crIsProductive(r.code) && typeof r.m==='number' ? r.m : 0); });
           const per = {}; Object.entries(mins).forEach(([id,v])=>{ per[id] = Math.round(v/60*100)/100; }); return per;
         };
-        const pps = crAddDays(ps,-14), pth = crAddDays(through,-14);
+        // Like for like: the previous pay period through its same NUMBER of workdays (so a holiday
+        // in one period doesn't make the comparison uneven), plus any weekend days that follow, up
+        // to the same calendar point.
+        const pps = crAddDays(ps,-14);
+        let pth = pps, seen = 0;
+        for(let d=pps; d<=crAddDays(pps,13); d=crAddDays(d,1)){ if(crIsWorkday(d)){ seen++; pth = d; if(seen>=wd) break; } }
+        while(crAddDays(pth,1) <= crAddDays(through,-14) && !crIsWorkday(crAddDays(pth,1))) pth = crAddDays(pth,1);
         const prevOk = minD <= pps && !crMissingWeekdays(daySet, pps, pth).length;
-        out.toDate = {pe, start:ps, through, wd, of:10, per:sumHours(ps,through), prev: prevOk ? sumHours(pps,pth) : null, prevStart:pps, prevThrough:pth};
+        out.toDate = {pe, start:ps, through, wd, of:crWorkdaysIn(ps,pe), per:sumHours(ps,through), prev: prevOk ? sumHours(pps,pth) : null, prevStart:pps, prevThrough:pth};
         out.computed.push(`Pay period to date ${ps} – ${through}`);
       }
     }
@@ -9534,7 +9555,7 @@ async delSRow(enc){
   async commitUkg(){
     const p=M.prevUkg; if(!p||p.error||!p.matched.length) return;
     S.pd=S.pd||{}; S.pd[p.end]=S.pd[p.end]||{};
-    p.matched.forEach(m=>{ S.pd[p.end][m.id]={...(S.pd[p.end][m.id]||{}), hfc:m.hfc, pto:m.pto, ot:m.ot, adminHrs:m.adminHrs}; });
+    p.matched.forEach(m=>{ S.pd[p.end][m.id]={...(S.pd[p.end][m.id]||{}), hfc:m.hfc, pto:m.pto, ot:m.ot, adminHrs:m.adminHrs, hol:m.hol||0}; });
     const ok=await sv('p',S.pd);
     if(!ok) return;
     recordImport('ukg_time',{row_count:p.matched.length, period_label:p.end, data_through:p.end});
