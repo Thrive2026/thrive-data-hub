@@ -5654,6 +5654,36 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
   }
   if(hoursOld.length) out.skipped.push(`Billable hours: ${hoursOld.length} pay period${hoursOld.length!==1?'s':''} (from ${hoursOld.sort()[0]}) need a Notes export re-uploaded that covers them`);
 
+  // ── Pay period in progress, to date (added 11/16/26, per Brandon) ──
+  // The Community Hub shows the pay period that's still running, measured against a goal scaled
+  // to the workdays elapsed ("on pace"), and compared with the SAME days of the previous pay
+  // period (like for like). Counts through the last full day on file — today is left out because
+  // its notes are still being written. Saved separately (hoursTD + _htd) so the other hubs, which
+  // read `hours`, keep showing completed pay periods only.
+  out.toDate = null;
+  {
+    const ps = start, pe = crAddDays(start, 13);
+    let through = maxD < todayISO ? maxD : crAddDays(todayISO, -1);
+    if(through > pe) through = pe;
+    const wdCount = (a,b) => { let n=0; for(let d=a; d<=b; d=crAddDays(d,1)){ const w=new Date(d+'T00:00:00Z').getUTCDay(); if(w>=1 && w<=5) n++; } return n; };
+    const wd = through >= ps ? wdCount(ps, through) : 0;
+    if(wd > 0 && minD <= ps){
+      const miss = crMissingWeekdays(daySet, ps, through);
+      if(miss.length) gapNote('Pay period to date', ps, through, miss);
+      else{
+        const sumHours = (a,b) => {
+          const mins = {};
+          rows.forEach(r=>{ if(r.d<a || r.d>b) return; const id=staffOf(r.by); if(id==null || (hoursStaff && !hoursStaff.has(id))) return; mins[id]=(mins[id]||0) + (crIsProductive(r.code) && typeof r.m==='number' ? r.m : 0); });
+          const per = {}; Object.entries(mins).forEach(([id,v])=>{ per[id] = Math.round(v/60*100)/100; }); return per;
+        };
+        const pps = crAddDays(ps,-14), pth = crAddDays(through,-14);
+        const prevOk = minD <= pps && !crMissingWeekdays(daySet, pps, pth).length;
+        out.toDate = {pe, start:ps, through, wd, of:10, per:sumHours(ps,through), prev: prevOk ? sumHours(pps,pth) : null, prevStart:pps, prevThrough:pth};
+        out.computed.push(`Pay period to date ${ps} – ${through}`);
+      }
+    }
+  }
+
   // ── Late notes, weekly (Sat–Fri, keyed by the Friday, like the old "10.24-10.30" tabs) ──
   // Same rule as the Late Notes 2026 workbook: a peer support note (H0038, H0038 GT, H0038 HM)
   // whose "Hours Late Starting Note" — Created Date minus Start Note By Date — is over 48.
@@ -5783,7 +5813,20 @@ async function recomputeCommunityFromRaw(opts){
     (res.gaps||{hours:[]}).hours.forEach(k=>clearFields(k, ['hours']));
     (res.gaps||{late:[]}).late.forEach(k=>clearFields(k, ['lateNotes'], '_lnImported'));
     (res.gaps||{caseload:[]}).caseload.forEach(k=>clearFields(k, ['caseload','outreach','engagement']));
-    if(cleared && !(hKeys.length || cKeys.length || lKeys.length)) await sv('p', S.pd);
+    // Pay period to date (11/16/26): drop any earlier to-date numbers, then write the current ones.
+    let tdChanged = false;
+    Object.keys(S.pd||{}).forEach(k=>{
+      const per = S.pd[k]; if(!per || typeof per!=='object' || !per._htd) return;
+      delete per._htd; Object.values(per).forEach(rec=>{ if(rec && typeof rec==='object') delete rec.hoursTD; }); tdChanged = true;
+    });
+    if(res.toDate){
+      const td = res.toDate, k = td.pe;
+      S.pd = S.pd || {}; S.pd[k] = S.pd[k] || {};
+      Object.entries(td.per).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hoursTD:h}; });
+      S.pd[k]._htd = {start:td.start, through:td.through, wd:td.wd, of:td.of, prev:td.prev, prevStart:td.prevStart, prevThrough:td.prevThrough};
+      tdChanged = true;
+    }
+    if((cleared || tdChanged) && !(hKeys.length || cKeys.length || lKeys.length)) await sv('p', S.pd);
     if(hKeys.length || cKeys.length || lKeys.length){
       S.pd = S.pd || {};
       hKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.hours[k]).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hours:h}; }); });
@@ -5800,10 +5843,11 @@ async function recomputeCommunityFromRaw(opts){
     if(hKeys.length) lines.push(`✓ Billable hours updated for ${hKeys.length} period${hKeys.length!==1?'s':''} (latest ending ${hKeys.slice().sort().pop()})`);
     if(lKeys.length) lines.push(`✓ Late notes updated for ${lKeys.length} week${lKeys.length!==1?'s':''} (latest ending ${lKeys.slice().sort().pop()})`);
     if(cKeys.length) lines.push(`✓ Caseload & engagement updated for ${cKeys.length} week${cKeys.length!==1?'s':''} (latest ending ${cKeys.slice().sort().pop()})`);
+    if(res.toDate) lines.push(`✓ Pay period in progress: hours through ${res.toDate.through} (${res.toDate.wd} of ${res.toDate.of} workdays)`);
     if(res.skipped.length) lines.push('Still waiting:\n• '+res.skipped.join('\n• '));
     if(!lines.length) lines.push('Nothing new to compute from the notes on file.');
     t.textContent = lines.join('\n');
-    t.style.cssText='position:fixed;bottom:20px;right:20px;max-width:440px;white-space:pre-line;background:'+(res.skipped.length&&!hKeys.length&&!cKeys.length&&!lKeys.length?'#92400E':'#1B5E20')+';color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
+    t.style.cssText='position:fixed;bottom:20px;right:20px;max-width:440px;white-space:pre-line;background:'+(res.skipped.length&&!hKeys.length&&!cKeys.length&&!lKeys.length&&!res.toDate?'#92400E':'#1B5E20')+';color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-family:inherit;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.2)';
     document.body.appendChild(t); setTimeout(()=>t.remove(), res.skipped.length?14000:7000);
     if(!opts.noRender) render();
     return res;
