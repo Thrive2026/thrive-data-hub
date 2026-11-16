@@ -5776,6 +5776,57 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
   return out;
 }
 
+// ── Clients & Billable Encounters from ALL of a person's notes (added 11/16/26, per Brandon) ──
+// The Courts/Jail/CTP hub's "Clients" and "Bill. Enc." columns used to count only notes filed
+// under a Courts & Jail division (Cuyahoga County Jail, OneOhio, COSSAP/Oriana, "court"), so
+// staff whose notes are filed under MH/SUD Community Services (CTP, ALS, Trumbull WD, SEO, Safe
+// Harbor…) showed 0. For staff on that hub — anyone whose manager is in CR_ALLNOTES_MANAGERS —
+// both columns now count every note the person wrote that calendar month, whatever division it
+// is filed under:
+//   - Clients            = distinct clients they wrote a note for this month
+//   - Billable Encounters = their notes this month except "(ADMIN)" and "(Non-billable)" — the
+//                           same two exclusions the division-based count always used
+// Computed from the stored note pool (so it is month-to-date across uploads, not just the last
+// file), for this month and the two before it, keyed YYYY-MM-01 like the division-based count.
+// A month is skipped if the notes on file have a gap in it. Staff NOT on that hub keep the
+// division-based count from the Notes upload, unchanged.
+const CR_ALLNOTES_MANAGERS = ['Rachel','Jessica'];
+const CR_ALLNOTES_MONTHS = 3;
+function crClientCounts({pool, resolveStaff, hubIds, todayISO}){
+  const rows = []; let minD=null, maxD=null;
+  Object.values(pool||{}).forEach(month=>{ Object.values(month||{}).forEach(r=>{
+    if(!r || !r.d) return; const d=String(r.d).slice(0,10);
+    rows.push({d, by:r.b||'', code:crCode(r.c).toLowerCase(), cl:r.cl==null?'':String(r.cl).trim()});
+    if(!minD || d<minD) minD=d; if(!maxD || d>maxD) maxD=d;
+  }); });
+  const out = {months:{}, skipped:[]};
+  if(!rows.length || !hubIds || !hubIds.size) return out;
+  const daySet = new Set(rows.map(r=>r.d));
+  const cache = {}; const staffOf = n => (n in cache) ? cache[n] : (cache[n] = resolveStaff(n));
+  const yesterday = crAddDays(todayISO,-1);
+  let y = +todayISO.slice(0,4), m = +todayISO.slice(5,7);
+  for(let i=0;i<CR_ALLNOTES_MONTHS;i++){
+    const ms = `${y}-${String(m).padStart(2,'0')}-01`;
+    const me = crAddDays(`${m===12?y+1:y}-${String(m===12?1:m+1).padStart(2,'0')}-01`, -1);
+    m--; if(m===0){ m=12; y--; }
+    if(maxD < ms) continue;
+    if(minD > ms){ if(i===0) out.skipped.push(`Clients & billable encounters ${ms.slice(0,7)}: notes on file don't go back to the 1st`); continue; }
+    const chkEnd = [me, maxD, yesterday].sort()[0];
+    if(chkEnd >= ms){ const miss = crMissingWeekdays(daySet, ms, chkEnd); if(miss.length){ out.skipped.push(`Clients & billable encounters ${ms.slice(0,7)}: no notes on file for ${miss.length} weekday${miss.length!==1?'s':''} (${miss.slice(0,3).join(', ')}${miss.length>3?'…':''})`); continue; } }
+    const acc = {};
+    rows.forEach(r=>{
+      if(r.d<ms || r.d>me) return;
+      const id = staffOf(r.by); if(id==null || !hubIds.has(id)) return;
+      const a = acc[id] = acc[id] || {clients:new Set(), billable:0};
+      if(r.cl) a.clients.add(r.cl);
+      if(r.code!=='admin' && !/^non-?billable/.test(r.code)) a.billable++;
+    });
+    const per = {}; Object.entries(acc).forEach(([id,a])=>{ per[id] = {clients:a.clients.size, billableEncounters:a.billable}; });
+    if(Object.keys(per).length) out.months[ms] = per;
+  }
+  return out;
+}
+
 // Renewals upload → caseload snapshot for today. caseloadMap: {clientId: peerSupporterName}
 async function saveCaseloadSnapshot(caseloadMap){
   try{
@@ -5847,7 +5898,18 @@ async function recomputeCommunityFromRaw(opts){
       S.pd[k]._htd = {start:td.start, through:td.through, wd:td.wd, of:td.of, prev:td.prev, prevStart:td.prevStart, prevThrough:td.prevThrough};
       tdChanged = true;
     }
+    // Clients & billable encounters from all notes, for staff on the Courts/Jail/CTP hub (11/16/26)
+    let ccMonths = [];
+    try{
+      const hubIds = new Set(S.staff.filter(s=>CR_ALLNOTES_MANAGERS.includes(s.mgr)).map(s=>s.id));
+      const cc = crClientCounts({pool:S.linkageNotesRaw, resolveStaff, hubIds, todayISO:new Date().toISOString().slice(0,10)});
+      ccMonths = Object.keys(cc.months);
+      ccMonths.forEach(k=>{ S.pd = S.pd||{}; S.pd[k] = S.pd[k]||{}; Object.entries(cc.months[k]).forEach(([id,v])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), ...v}; }); });
+      cc.skipped.forEach(x=>res.skipped.push(x));
+      if(ccMonths.length){ tdChanged = true; res.clientMonths = ccMonths; }
+    }catch(e){ console.warn('[crClientCounts]', e); }
     if((cleared || tdChanged) && !(hKeys.length || cKeys.length || lKeys.length)) await sv('p', S.pd);
+    if(ccMonths.length) recordImport('courts_billing', {row_count:ccMonths.reduce((a,k)=>a+Object.keys(S.pd[k]||{}).length,0), period_label:ccMonths.slice().sort().pop(), data_through:ccMonths.slice().sort().pop(), source_filename:'computed from Pimsy Notes (all notes)'});
     if(hKeys.length || cKeys.length || lKeys.length){
       S.pd = S.pd || {};
       hKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.hours[k]).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hours:h}; }); });
@@ -5864,6 +5926,7 @@ async function recomputeCommunityFromRaw(opts){
     if(hKeys.length) lines.push(`✓ Billable hours updated for ${hKeys.length} period${hKeys.length!==1?'s':''} (latest ending ${hKeys.slice().sort().pop()})`);
     if(lKeys.length) lines.push(`✓ Late notes updated for ${lKeys.length} week${lKeys.length!==1?'s':''} (latest ending ${lKeys.slice().sort().pop()})`);
     if(cKeys.length) lines.push(`✓ Caseload & engagement updated for ${cKeys.length} week${cKeys.length!==1?'s':''} (latest ending ${cKeys.slice().sort().pop()})`);
+    if(res.clientMonths && res.clientMonths.length) lines.push(`✓ Clients & billable encounters (all notes) updated for ${res.clientMonths.length} month${res.clientMonths.length!==1?'s':''}`);
     if(res.toDate) lines.push(`✓ Pay period in progress: hours through ${res.toDate.through} (${res.toDate.wd} of ${res.toDate.of} workdays)`);
     if(res.skipped.length) lines.push('Still waiting:\n• '+res.skipped.join('\n• '));
     if(!lines.length) lines.push('Nothing new to compute from the notes on file.');
