@@ -6256,7 +6256,15 @@ const SC = (function(){
     out.push(cur); return out;
   }
   function parseTripLog(text){
-    const lines = text.replace(/^﻿/,'').split(/\r?\n/);
+    // A note typed with a line break inside it (e.g. "departed from A.H.<newline>last trip") spans
+    // two physical lines in TripLog's CSV. Rejoin them first, or everything after it for that person
+    // is dropped (found 11/19/26: Kayla Miller lost 372 of 421 trips).
+    const raw = text.replace(/^﻿/,'').split(/\r?\n/), lines = [];
+    for(let i=0;i<raw.length;i++){
+      let L = raw[i];
+      while(((L.match(/"/g)||[]).length % 2) && i+1 < raw.length){ L += ' ' + raw[++i]; }
+      lines.push(L);
+    }
     const byUser={}; let user=null, hdr=null, asof=null, trips=0;
     const gm = text.match(/Generated on ([A-Za-z]{3}) (\d{1,2}), (\d{4})/);
     if(gm){ const mi=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(gm[1].toLowerCase()); asof=`${gm[3]}-${pad(mi+1)}-${pad(gm[2])}`; }
