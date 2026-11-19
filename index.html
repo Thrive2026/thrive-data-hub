@@ -6536,17 +6536,24 @@ function aliasLinkPanel(kind, p){
     if(u.done) return `<div style="display:flex;gap:8px;align-items:center;padding:3px 0;color:${u.done==='skip'?'#8089a8':'#1B5E20'}">${u.done==='skip'?'—':'✓'} <b>${dhscEsc(u.raw)}</b> ${u.done==='skip'?'skipped (not on the roster)':'linked to '+dhscEsc(u.linkedName||'')}</div>`;
     return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;border-top:1px solid #f0ebe1">
       <div style="width:130px;font-weight:600;color:#1a2861">${dhscEsc(u.raw)}</div>
-      <select id="al-${kind}-${i}" style="font-size:12px;padding:3px 6px;border:1px solid ${u.guess?'#3c50a0':'#cdc4b2'};border-radius:4px;font-family:inherit;width:220px">${opts(u.guess)}</select>
+      <select id="al-${kind}-${i}" onchange="DHSC['${kind}'].unmatched[${i}].pick=this.value||null;dhscRefresh()" style="font-size:12px;padding:3px 6px;border:1px solid ${u.guess?'#3c50a0':'#cdc4b2'};border-radius:4px;font-family:inherit;width:220px">${opts(u.pick!=null?u.pick:u.guess)}</select>
       ${u.guess?'<span style="font-size:10px;color:#3c50a0">suggested — check it</span>':''}
       <button class="btn-g" style="font-size:11px" onclick="aliasLink('${kind}',${i})">Link</button>
       ${u.err?`<div style="flex-basis:100%;color:#991B1B;font-size:11px">${dhscEsc(u.err)}</div>`:''}
     </div>`;
   }).join('');
+  // "Approve all" (11/19/26, per Brandon): links every row that has a person (or "Not on our roster")
+  // picked, using whatever is selected in each dropdown right now, in one click.
+  const ready = list.length ? (p.unmatched||[]).filter(u=>!u.done && (u.pick!=null ? u.pick : u.guess)).length : 0;
+  const allBtn = list.length ? `<div style="display:flex;align-items:center;gap:10px;margin:6px 0"><button class="btn-n" style="font-size:11px" onclick="aliasLinkAll('${kind}')">✓ Approve all picked (${ready})</button><span style="font-size:11px;color:#8089a8">${list.length-ready?`${list.length-ready} still need a person picked`:'every name has a pick'}</span></div>` : '';
   return `<div style="margin-top:10px;padding:10px 12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:6px">
     <div style="font-weight:700;color:#1a2861;margin-bottom:2px">Names to link to the roster</div>
-    <div style="font-size:11px;color:#8089a8;margin-bottom:6px">Pick who each name belongs to and click Link. It's remembered for every future upload and every hub. Suggestions are a best guess from the spelling — check them.${list.length>1?` <a href="#" onclick="aliasLinkAll('${kind}');return false" style="color:#3c50a0">Link all that have a person picked</a>`:''}</div>
-    ${rows}</div>`;
+    <div style="font-size:11px;color:#8089a8;margin-bottom:6px">Pick who each name belongs to. It's remembered for every future upload and every hub. Suggestions are a best guess from the spelling — check them, change any that are wrong, then approve them all at once.</div>
+    ${allBtn}
+    ${rows}
+    ${list.length>4?allBtn:''}</div>`;
 }
+let ALIAS_COL = null; // staff_aliases column that takes the raw spelling (found on first successful save)
 async function aliasLink(kind, i, bulk){
   const p = DHSC[kind]; const u = p && p.unmatched && p.unmatched[i]; if(!u || u.done) return true;
   const el = document.getElementById(`al-${kind}-${i}`); const v = el ? el.value : '';
@@ -6554,17 +6561,29 @@ async function aliasLink(kind, i, bulk){
   if(v==='__none'){ u.done='skip'; u.err=null; if(!bulk) dhscRefresh(); return true; }
   const st = (S.staff||[]).find(x=>String(x.id)===String(v)); if(!st) return false;
   const alias = normAliasName(u.raw);
+  // staff_aliases.alias_norm is a GENERATED column (found 11/19/26), so the raw spelling goes in
+  // the source column and Postgres works out alias_norm itself. The source column's name isn't in
+  // this file, so try the likely names in order and remember the one that works.
   try{
-    const r = await sbFetch(`${SB_URL}/rest/v1/staff_aliases`,{method:'POST',body:JSON.stringify({staff_id:st.id, alias_norm:alias})},{'Prefer':'return=minimal'});
-    if(!r.ok){
-      const t = await r.text();
-      if(!/duplicate|23505/i.test(t)) throw new Error(t.slice(0,200));
-      // already saved once (e.g. a second upload in the same session): point it at this person
-      const r2 = await sbFetch(`${SB_URL}/rest/v1/staff_aliases?alias_norm=eq.${encodeURIComponent(alias)}`,{method:'PATCH',body:JSON.stringify({staff_id:st.id})});
-      if(!r2.ok) throw new Error((await r2.text()).slice(0,200));
+    let saved = false, lastErr = '';
+    const cols = ALIAS_COL ? [ALIAS_COL] : ['alias','alias_name','raw_alias','alias_raw','name'];
+    for(const col of cols){
+      const r = await sbFetch(`${SB_URL}/rest/v1/staff_aliases`,{method:'POST',body:JSON.stringify({staff_id:st.id, [col]:u.raw.trim()})},{'Prefer':'return=minimal'});
+      if(r.ok){ ALIAS_COL = col; saved = true; break; }
+      const t = await r.text(); lastErr = t;
+      if(/PGRST204|could not find the .* column|column .* does not exist|42703/i.test(t)) continue;   // wrong column name: try the next
+      if(/duplicate|23505/i.test(t)){
+        // this spelling is already saved (maybe pointing at someone else): point it at this person
+        ALIAS_COL = col;
+        const r2 = await sbFetch(`${SB_URL}/rest/v1/staff_aliases?alias_norm=eq.${encodeURIComponent(alias)}`,{method:'PATCH',body:JSON.stringify({staff_id:st.id})});
+        if(!r2.ok) throw new Error((await r2.text()).slice(0,200));
+        saved = true; break;
+      }
+      throw new Error(t.slice(0,200));
     }
+    if(!saved) throw new Error(lastErr.slice(0,200));
   }catch(e){
-    u.err = `Couldn't save the link (${e.message}). Ask Brandon to run in Supabase: insert into staff_aliases (staff_id, alias_norm) values (${st.id}, '${alias.replace(/'/g,"''")}');`;
+    u.err = `Couldn't save the link (${e.message}). Run this in the Supabase SQL editor instead: insert into staff_aliases (staff_id, ${ALIAS_COL||'alias'}) values (${st.id}, '${u.raw.trim().replace(/'/g,"''")}');`;
     if(!bulk) dhscRefresh(); return false;
   }
   STAFF_ALIAS_MAP[alias] = st.id;
