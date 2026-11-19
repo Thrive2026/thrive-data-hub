@@ -855,6 +855,7 @@ async function syncFromSupabase(){
     // upload gets merged into, rather than each upload starting from a blank slate.
     const linkRaw=parse('linkage_notes_raw');if(linkRaw&&typeof linkRaw==='object'){S.linkageNotesRaw=linkRaw;cacheLocal('linkageNotesRaw',S.linkageNotesRaw);}
     const clSnaps=parse('caseload_snapshots');if(clSnaps&&clSnaps.snapshots){S.caseloadSnapshots=clSnaps.snapshots;}
+    const sRules=parse('status_rules');if(sRules&&typeof sRules==='object'){S.statusRules={...STATUS_RULES_DEFAULT,...sRules};}
   }
   const remoteTasks=await db.get('tasks');
   if(remoteTasks){
@@ -955,10 +956,33 @@ const COMMUNITY_MGRS=['Brian','Cara','John','Luke'];
 // Community, Courts, Hospital, and Linkage all read/write the SAME shared Supabase key
 // ('staff') for roster data — so an edit made here reflects everywhere immediately.
 const SETTINGS_MGRS=['Brian','Cara','John','Luke','Rachel','Jessica','Angelica','Debra','David'];
-const DTGT={ftHours:40,ptHours:20,caseloadFT:18,caseloadPT:10,lateMax:2};
+// Default billable-hours expectation per two-week pay period: 26 hrs/wk full time, 13 hrs/wk part time
+// (set by Sarah Neff, confirmed by Brandon 11/16/26; was 40/20). A person's own target, set in
+// Staff & Settings (staff.hrsTarget), replaces the default for that person.
+// ── Staff status rules (11/18/26, from Sarah Neff's answers) ──
+// One shared copy in appdata 'status_rules', edited on Staff & Settings in this hub and read by
+// Community Hub and Director Hub. Defaults below are Sarah's answers; blank (null) = not decided
+// yet, so that check is off until someone fills it in.
+//   Hours: % of the person's own target (Staff & Settings) for the pay period.
+//   Engagement / outreach: % for the week. Late notes: H0038 peer support notes, per week.
+//   Any red measure makes the person red; otherwise any yellow makes them yellow.
+const STATUS_RULES_DEFAULT={
+  hoursRedBelow:65, hoursGreenAt:76,
+  engRedBelow:50, engGreenAt:66,
+  outRedBelow:65, outGreenAt:86,
+  lateGreenMax:10, lateRedOver:15,
+  concWeekHrs:8, concDayHrs:3, concIsRed:true,
+  outreachDays:7,
+  wellnessHrs:null,
+  otApprovalPerPeriod:20,
+  tripsPerMonth:null
+};
+const DTGT={ftHours:52,ptHours:26,caseloadFT:18,caseloadPT:10,lateMax:2};
 // Confirmed FT/PT monthly targets: 26 hrs/wk (FT) and 13 hrs/wk (PT) × $69.96/hr H0038 rate.
 // Production is pulled every 2 weeks in arrears, so "on track" compares against the biweekly
 // (2-week) figure, not the monthly one — using weekly rate × 2, not a calendar-day approximation.
+// Dollar goal for one person: their own hours target (Staff & Settings) at the same rate, else the FT/PT standard (11/16/26).
+function prsGoalFor(s){return (typeof s.hrsTarget==='number'&&s.hrsTarget>0)?Math.round(s.hrsTarget*PRS_GOAL_BIWEEKLY_FT/52):(s.tp==='FT'?PRS_GOAL_BIWEEKLY_FT:PRS_GOAL_BIWEEKLY_PT);}
 const PRS_GOAL_BIWEEKLY_FT=3638; // 26 hrs/wk × $69.96/hr × 2 weeks
 const PRS_GOAL_BIWEEKLY_PT=1819; // 13 hrs/wk × $69.96/hr × 2 weeks
 
@@ -2908,7 +2932,7 @@ const DATA_CATALOG = [
   {registryKey:'roster_hours', label:'Roster — Billable Hours', supaKey:'pd (hours field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Every manager hub, BD Dashboard (Progress to Goal)', cadenceDays:14, note:'No separate upload — computed automatically from the Pimsy Notes export for each completed Sat–Fri biweekly period.'},
   {registryKey:'roster_caseload', label:'Roster — Caseload / Engagement', supaKey:'pd (caseload field)', uploadedVia:'Data & Staff Hub — computed from Pimsy Notes + Renewals (11/9/26)', consumers:'Every manager hub, BD Dashboard (county caseload)', cadenceDays:7, note:'No separate upload — caseload comes from the Renewals export (saved as caseload_snapshots, client numbers hashed); outreach/engagement from the Pimsy Notes export, each completed Mon–Sun week.'},
   {registryKey:'ukg_time', label:'UKG Time (PTO / overtime / admin hours)', supaKey:'pd (hfc, pto, ot, adminHrs fields)', uploadedVia:'Data & Staff Hub (added 11/11/26)', consumers:'Community Hub (Productivity %, PTO-adjusted targets)', cadenceDays:14, note:'Both UKG Calculated Time Summary reports for a pay period, uploaded together. Hours for Calculation uses the old productivity workbook formula.'},
-  {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7, note:'No separate upload — H0038/GT/HM notes started more than 48 hours late (Created Date minus Start Note By Date), by session date, each completed Sat–Fri week.'},
+  {registryKey:'roster_late_notes', label:'Roster — Late Notes', supaKey:'pd (lateNotes field)', uploadedVia:'Data & Staff Hub — computed from the Pimsy Notes upload (11/9/26)', consumers:'Community/Hospital/Courts manager hubs', cadenceDays:7, note:'No separate upload — H0038/GT/HM notes started more than 48 hours late (Created Date minus Start Note By Date), by session date, each completed Sat–Fri week. Also totalled for each two-week pay period, with hours past the 48-hour mark, for the Director Hub team tables (11/16/26).'},
   {registryKey:'courts_billing', label:'Courts & Jail Billing', supaKey:'pd (clients field)', uploadedVia:'Data & Staff Hub (Pimsy Notes upload)', consumers:'Courts & Jail Hub', cadenceDays:7},
   {registryKey:'pimsy_notes', label:'Pimsy Notes Export (Linkage + Courts/Jail)', supaKey:'linkage_data, linkage_history, linkage_notes_raw', uploadedVia:'Data & Staff Hub', consumers:'BH Linkage Hub, Courts & Jail Hub', cadenceDays:7},
   {registryKey:'program_hub_ledger', label:'Program Hub Ledger (Sessions/Revenue/Minutes + Client Sets)', supaKey:'program_ledger', uploadedVia:'Data & Staff Hub (rides along with the Pimsy Notes upload above, added 9/15/26; client sets added 9/16/26)', consumers:'Outcomes Dashboard (Sessions/Revenue/Minutes trend + rollup; Active Caseload/Total Admitted for Community + CCJ, live as of 9/16/26)', cadenceDays:7, note:'No separate upload — same file as Pimsy Notes above. Screener Rate and PHQ-9/GAD-7/Risk improvement % are computed on the Outcomes Dashboard side against live sli_assessments, joined to the client set this row provides.'},
@@ -3273,7 +3297,7 @@ let S={
   staff:initStaff(),
   pd:lv('p',{}), up:lv('up',{}), upAt:lv('upAt',{}), renewals:lv('r',[]), tasks:lv('t',[]),
   noteLogs:lv('nlogs',{}), casAudit:lv('casAudit',{}),
-  tgt:lv('g',DTGT), period:lv('pp','2026-04-11'),
+  tgt:{...lv('g',DTGT), ftHours:DTGT.ftHours, ptHours:DTGT.ptHours}, statusRules:{...STATUS_RULES_DEFAULT}, period:lv('pp','2026-04-11'),
   renMgr:'', renTier:'', renProv:'', renType:'', renStat:'open', renAdc:false,
   taskMgr:'', taskStat:'open', pmFilters:{}, pmOverrides:lv('pmov',{}),
   supOverrides:lv('supov',{}), supMgr:'', supImport:lv('supimp',null),
@@ -3322,13 +3346,20 @@ function supToggle(staffKey,cred){const ml=curMonthLabel();const ov=JSON.parse(J
 function gT(due){return ThriveRenewals.dueBadge(due);}
 function gCS(r){return ThriveRenewals.classify(r);}
 function collapsePurpleDuplicates(list){return ThriveRenewals.collapsePurpleDuplicates(list);}
-function gH(s,m,t){if(!m)return'none';const tg=s.hrsTarget||(s.tp==='FT'?t.ftHours:t.ptHours);const r=tg>0?(m.hours||0)/tg:1;const eng=m.engagement||0;const prsGoal=s.tp==='FT'?PRS_GOAL_BIWEEKLY_FT:PRS_GOAL_BIWEEKLY_PT;
-const prsPct=m.revenue!=null?(m.revenue/prsGoal)*100:null;if((m.lateNotes||0)>t.lateMax||r<0.70||(eng>0&&eng<50)||(prsPct!=null&&prsPct<70))return'critical';if(r<0.85||(m.lateNotes||0)>0||(eng>0&&eng<70)||(prsPct!=null&&prsPct<100))return'warning';return'good';}
+// 11/18/26 — same status rules as Community Hub and Director Hub (S.statusRules, Sarah's answers):
+// any red measure makes the person red; otherwise any yellow makes them yellow.
+function gH(s,m,t){if(!m)return'none';const R=S.statusRules||STATUS_RULES_DEFAULT;const tg=s.hrsTarget||(s.tp==='FT'?t.ftHours:t.ptHours);const lv=[];const band=(v,red,green)=>v<red?2:v<green?1:0;
+if(typeof m.hours==='number'&&tg>0)lv.push(band(m.hours/tg*100,R.hoursRedBelow,R.hoursGreenAt));
+if(m.engagement>0)lv.push(band(m.engagement,R.engRedBelow,R.engGreenAt));
+if(m.outreach>0)lv.push(band(m.outreach,R.outRedBelow,R.outGreenAt));
+if(typeof m.lateNotes==='number')lv.push(m.lateNotes>R.lateRedOver?2:m.lateNotes>R.lateGreenMax?1:0);
+if(m.conc>0)lv.push(R.concIsRed?2:1);
+if(!lv.length)return'none';const w=Math.max(...lv);return w===2?'critical':w===1?'warning':'good';}
 
 function periodHasField(pd,field){if(!pd)return false;if(field==='lateNotes'){return!!pd._lnImported;}return Object.values(pd).some(v=>{if(!v)return false;const x=v[field];return typeof x==='number'&&x>0;});}
 function periodForField(field){const todayKey=new Date().toISOString().split('T')[0];const ps=Object.keys(S.pd||{}).filter(p=>p<=todayKey&&periodHasField(S.pd[p],field)).sort();return ps.length?ps[ps.length-1]:null;}
 function prevPeriodFor(field){const cur=periodForField(field);if(!cur)return null;const ps=Object.keys(S.pd||{}).filter(p=>p<cur&&periodHasField(S.pd[p],field)).sort();return ps.length?ps[ps.length-1]:null;}
-function pdResolved(){const METRICS=['hours','caseload','engagement','outreach','lateNotes','revenue','clients','billableEncounters'];const out={};S.staff.forEach(s=>{out[s.id]={_src:{}};});for(const m of METRICS){const p=periodForField(m);if(!p)continue;const dm=S.pd[p]||{};S.staff.forEach(s=>{const v=dm[s.id]?.[m];if(v!=null){out[s.id][m]=v;out[s.id]._src[m]=p;}});}return out;}
+function pdResolved(){const METRICS=['hours','caseload','engagement','outreach','lateNotes','revenue','clients','billableEncounters','conc'];const out={};S.staff.forEach(s=>{out[s.id]={_src:{}};});for(const m of METRICS){const p=periodForField(m);if(!p)continue;const dm=S.pd[p]||{};S.staff.forEach(s=>{const v=dm[s.id]?.[m];if(v!=null){out[s.id][m]=v;out[s.id]._src[m]=p;}});}return out;}
 function prevValFor(staffId,field){const pp=prevPeriodFor(field);if(!pp)return null;const rec=(S.pd[pp]||{})[staffId];if(!rec)return null;const v=rec[field];return(typeof v==='number')?v:null;}
 function shiftIso(iso,days){const d=new Date(iso);d.setDate(d.getDate()+days);return d.toISOString().split('T')[0];}
 function trendBit(curr,prev,opts){opts=opts||{};if(curr==null||prev==null)return'';if(!opts.inverse&&(curr===0||prev===0))return'';if(opts.inverse&&curr===0&&prev===0)return'';const d=curr-prev;if(Math.abs(d)<0.05)return`<span style="font-size:9px;color:#8089a8;margin-left:3px" title="unchanged vs prior period">·</span>`;const up=d>0,good=opts.inverse?!up:up;const color=good?'#059669':'#DC2626';const arrow=up?'▲':'▼';const abs=Math.abs(d);const num=abs%1===0?abs:abs.toFixed(1);const sfx=opts.suffix||'';return`<span style="font-size:9px;color:${color};margin-left:3px;font-weight:700;white-space:nowrap" title="vs ${prev}${sfx} on ${opts.prevLabel||'prior period'}">${arrow}${num}${sfx}</span>`;}
@@ -3364,7 +3395,7 @@ function sTbl(list,opts){
       <td><span class="bdg" style="background:${s.tp==='FT'?'#DBEAFE':'#F3F4F6'};color:${s.tp==='FT'?'#1D4ED8':'#6B7280'}">${s.tp}</span></td>
       <td style="color:#3e4a78;font-size:11px">${xe(s.reg)}</td>
       <td style="font-weight:${m?.hours>0?700:400};color:${m?.hours>0?'#2C3B7E':'#D1D5DB'};white-space:nowrap">${m?.hours>0?(m.hours%1===0?m.hours:m.hours.toFixed(1)):'—'}${tbF('hours',m?.hours)}</td>
-      <td style="white-space:nowrap">${m?.revenue!=null?(()=>{const goal=s.tp==='FT'?PRS_GOAL_BIWEEKLY_FT:PRS_GOAL_BIWEEKLY_PT;const pct=Math.round((m.revenue/goal)*100);const col=pct>=100?'#059669':pct>=70?'#D97706':'#DC2626';return `<span style="font-weight:700;color:${col}" title="vs. $${goal.toLocaleString()} biweekly ${s.tp} goal">${pct}%</span>`;})():'<span style="color:#D1D5DB">—</span>'}</td>
+      <td style="white-space:nowrap">${m?.revenue!=null?(()=>{const goal=prsGoalFor(s);const pct=Math.round((m.revenue/goal)*100);const col=pct>=100?'#059669':pct>=70?'#D97706':'#DC2626';return `<span style="font-weight:700;color:${col}" title="vs. $${goal.toLocaleString()} biweekly ${s.tp} goal">${pct}%</span>`;})():'<span style="color:#D1D5DB">—</span>'}</td>
       <td style="font-weight:${m?.caseload>0?700:400};color:${m?.caseload>0?'#2C3B7E':'#D1D5DB'};white-space:nowrap">${m?.caseload||'—'}${tbF('caseload',m?.caseload)}</td>
       <td style="white-space:nowrap">${m?.lateNotes>0?`<span class="bdg" style="background:#FEE2E2;color:#991B1B">${m.lateNotes}</span>`:'<span style="color:#D1D5DB">—</span>'}${tbF('lateNotes',m?.lateNotes||0,{inverse:true})}</td>
       <td style="color:${m?.engagement>0?'#2C3B7E':'#D1D5DB'};white-space:nowrap">${m?.engagement>0?m.engagement+'%':'—'}${tbF('engagement',m?.engagement,{suffix:'%'})}</td>
@@ -3712,6 +3743,45 @@ async function refreshStaffingData(){
 // the row's full current field set into something embeddable in an onclick attribute.
 function encRow(s){return btoa(unescape(encodeURIComponent(JSON.stringify(s))));}
 function decRow(enc){return JSON.parse(decodeURIComponent(escape(atob(enc))));}
+
+// Status rules card on Staff & Settings (11/18/26). Read-only summary; "Edit" opens the boxes.
+function statusRulesCard(){
+  const r=S.statusRules||STATUS_RULES_DEFAULT;
+  const v=x=>x==null||x===''?'<span style="color:#a52d6d">not set</span>':x;
+  const inp=(k,w,ph)=>`<input id="sr-${k}" type="number" step="any" value="${r[k]==null?'':r[k]}" placeholder="${ph||''}" style="width:${w||56}px;font-size:12px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:monospace"/>`;
+  const by=r.updatedAt?` · last changed ${String(r.updatedAt).slice(0,10)}${r.updatedBy?' by '+xe(r.updatedBy):''}`:' · using the defaults from Sarah\'s answers (11/18/26)';
+  const row=(lbl,txt)=>`<tr><td style="padding:5px 10px 5px 0;color:#3e4a78;white-space:nowrap;vertical-align:top">${lbl}</td><td style="padding:5px 0;color:#1a2861">${txt}</td></tr>`;
+  if(!S.srOpen){
+    return `<div class="card" style="padding:14px 16px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><div style="font-weight:700;color:#1a2861;font-size:14px">Status rules</div><div style="font-size:11px;color:#8089a8">Red / yellow / green for Community Hub and Director Hub${by}</div><button class="btn-g" style="font-size:11px;margin-left:auto" onclick="H.srToggle()">Edit</button></div>
+      <table style="font-size:12px;border-collapse:collapse">
+      ${row('Billable hours (pay period)',`red under ${v(r.hoursRedBelow)}% of their target · green at ${v(r.hoursGreenAt)}% and up · yellow in between`)}
+      ${row('Engagement (week)',`red under ${v(r.engRedBelow)}% · green at ${v(r.engGreenAt)}% and up`)}
+      ${row('Outreach (week)',`red under ${v(r.outRedBelow)}% · green at ${v(r.outGreenAt)}% and up`)}
+      ${row('Late notes (H0038, week)',`green ${v(r.lateGreenMax)} or fewer · red over ${v(r.lateRedOver)}`)}
+      ${row('Concentrated caseload',`a client over ${v(r.concWeekHrs)} hrs in a week or over ${v(r.concDayHrs)} hrs in a day${r.concIsRed?' · makes the person red':' · flag only'}`)}
+      ${row('Outreach gap',`flag clients with no note in ${v(r.outreachDays)} days`)}
+      ${row('Wellness check',r.wellnessHrs?`flag green staff over ${r.wellnessHrs} billable hrs in a pay period`:'<span style="color:#a52d6d">off — not decided yet</span>')}
+      ${row('Overtime',r.otApprovalPerPeriod?`"needs approval" over ${r.otApprovalPerPeriod} OT hrs in a pay period · "justified" when hours meet target`:'off')}
+      ${row('Trips',r.tripsPerMonth?`standard ${r.tripsPerMonth} per month (individual numbers in the table below)`:'<span style="color:#a52d6d">no standard set — enter each person\'s number below</span>')}
+      ${row('Overall','any red measure makes the person red; otherwise any yellow makes them yellow')}
+      </table></div>`;
+  }
+  const line=(lbl,html)=>`<div style="display:flex;align-items:center;gap:8px;margin:6px 0;font-size:12px;color:#3e4a78"><div style="width:200px">${lbl}</div><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${html}</div></div>`;
+  return `<div class="card" style="padding:14px 16px;margin-bottom:14px;border:1px solid #3c50a0">
+    <div style="font-weight:700;color:#1a2861;font-size:14px;margin-bottom:8px">Edit status rules</div>
+    ${line('Billable hours (% of target)',`red under ${inp('hoursRedBelow')} % · green at ${inp('hoursGreenAt')} % and up`)}
+    ${line('Engagement %',`red under ${inp('engRedBelow')} · green at ${inp('engGreenAt')} and up`)}
+    ${line('Outreach %',`red under ${inp('outRedBelow')} · green at ${inp('outGreenAt')} and up`)}
+    ${line('Late notes per week',`green ${inp('lateGreenMax')} or fewer · red over ${inp('lateRedOver')}`)}
+    ${line('Concentrated caseload',`one client over ${inp('concWeekHrs')} hrs/week or ${inp('concDayHrs')} hrs/day · <label><input id="sr-concIsRed" type="checkbox" ${r.concIsRed?'checked':''}/> makes the person red</label>`)}
+    ${line('Outreach gap (days)',inp('outreachDays'))}
+    ${line('Wellness check',`flag over ${inp('wellnessHrs',56,'off')} billable hrs per pay period (blank = off)`)}
+    ${line('Overtime needs approval',`over ${inp('otApprovalPerPeriod',56,'off')} OT hrs per pay period`)}
+    ${line('Trips (standard)',`${inp('tripsPerMonth',56,'none')} per month (blank = only individual numbers)`)}
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn-n" onclick="H.saveStatusRules()">Save rules</button><button class="btn-g" onclick="H.srToggle()">Cancel</button></div>
+  </div>`;
+}
 function setV(){
   const fm=S.setMgr,fs=S.setStat,fd=S.setDir;
   // Crisis Center rows always show (read-only), even if their mgr field is blank or stale.
@@ -3744,6 +3814,17 @@ function setV(){
     // person's rows from every name-matched Pimsy import (renewals, supervision). Editable when unlocked.
     const nmIn=(f,v,ph,w)=>`<input type="text" value="${xe(v||'').replace(/"/g,'&quot;')}" onchange="H.upName(${s.id},'${f}',this)" placeholder="${ph}" style="width:${w}px;font-size:12px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#1a2861;font-weight:500"/>`;
     const nameCell=ro?`${xe(s.fn)} ${xe(s.ln)}`:`${nmIn('fn',s.fn,'First',80)} ${nmIn('ln',s.ln,'Last',95)}`;
+    // NEW (11/16/26, per Brandon): each person's own billable-hours expectation per pay period.
+    // Blank = the standard for their FT/PT type (shown greyed in the box). Saved on the shared
+    // roster as hrsTarget, which the status logic (gH) already reads.
+    const hasOwn=typeof s.hrsTarget==='number'&&s.hrsTarget>0;
+    // Trips allowed per month (11/18/26, Sarah): a rough allotment that varies by person. Blank =
+    // the standard on Status rules (if one is set). Saved on the roster as tripsAllowed.
+    const tripDef=S.statusRules&&S.statusRules.tripsPerMonth;const hasTrips=typeof s.tripsAllowed==='number'&&s.tripsAllowed>0;
+    const tripCell=ro?`<span style="font-family:monospace;font-size:12px;${hasTrips?'font-weight:700;color:#1a2861':'color:#8089a8'}">${hasTrips?s.tripsAllowed:(tripDef||'—')}</span>`
+      :`<input type="number" min="1" max="500" step="1" value="${hasTrips?s.tripsAllowed:''}" placeholder="${tripDef||'—'}" onchange="H.upTrips(${s.id},this)" title="TripLog trips this person is expected to need in a month. Leave blank to use the standard on Status rules." style="width:58px;font-size:12px;padding:3px 6px;border:1px solid ${hasTrips?'#3c50a0':'#cdc4b2'};border-radius:4px;font-family:monospace;${hasTrips?'font-weight:700;color:#1a2861':''}"/>`;
+    const hrsCell=ro?`<span style="font-family:monospace;font-size:12px;${hasOwn?'font-weight:700;color:#1a2861':'color:#8089a8'}" title="${hasOwn?'Individual target':'Standard '+s.tp+' target'}">${hasOwn?s.hrsTarget:defHrs}</span>`
+      :`<input type="number" min="1" max="120" step="0.5" value="${hasOwn?s.hrsTarget:''}" placeholder="${defHrs}" onchange="H.upHrsTarget(${s.id},this)" title="Billable hours expected per two-week pay period. Leave blank to use the standard ${s.tp} target (${defHrs})." style="width:62px;font-size:12px;padding:3px 6px;border:1px solid ${hasOwn?'#3c50a0':'#cdc4b2'};border-radius:4px;font-family:monospace;${hasOwn?'font-weight:700;color:#1a2861':''}"/>`;
     const noteCell=ro?`<span>${xe(s.nt||'—')}</span>`:`<input type="text" value="${xe(s.nt||'').replace(/"/g,'&quot;')}" onchange="H.upS(${s.id},'nt',this.value)" placeholder="Add note…" style="width:150px;font-size:11px;padding:3px 6px;border:1px solid #cdc4b2;border-radius:4px;font-family:inherit;color:#3e4a78" />`;
     const actionCell=isCCOwned(s)?`<span class="bdg" style="background:#FCE7F3;color:#9D174D;border:1px solid #F9A8D4" title="Crisis Center staff are edited in the Crisis Center hub">Managed in Crisis Center hub</span>`:locked?'':`<button onclick="H.tgS(${s.id})" style="font-size:10px;padding:2px 7px;background:${s.status==='Active'?'#FEE2E2':'#C8E6C9'};color:${s.status==='Active'?'#991B1B':'#1B5E20'};border:none;border-radius:3px;cursor:pointer;font-family:inherit">${s.status==='Active'?'Deactivate':'Activate'}</button>${s.status==='Inactive'?` <button onclick="H.delS(${s.id})" title="Permanently remove — frees this Pimsy ID for reuse. Only for fixing a bad entry, not for someone who actually left (Deactivate keeps their history for that)." style="font-size:10px;padding:2px 7px;background:#fff;color:#991B1B;border:1px solid #991B1B;border-radius:3px;cursor:pointer;font-family:inherit;margin-left:4px">Delete</button>`:''}`;
     return`<tr style="background:${i%2===0?'#fff':'#FAFAFA'}">
@@ -3751,6 +3832,8 @@ function setV(){
       <td style="font-weight:500;color:#1a2861;white-space:nowrap">${nameCell}</td>
       <td>${mgrCell}</td>
       <td>${tpCell}</td>
+      <td style="white-space:nowrap">${hrsCell}</td>
+      <td style="white-space:nowrap">${tripCell}</td>
       <td><span class="bdg" style="background:${s.status==='Active'?'#C8E6C9':'#F3F4F6'};color:${s.status==='Active'?'#1B5E20':'#9CA3AF'}">${s.status}</span></td>
       <td>${regCell}</td>
       <td>${genderCell}</td>
@@ -3785,7 +3868,8 @@ function setV(){
     ${dupBar}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div style="font-weight:700;font-size:13px;color:#1a2861">Roster (${fil.length} shown)</div>${locked?'':'<button class="btn-n" onclick="H.om(\'staff\')">+ Add Staff</button>'}</div>
     <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap"><select class="inp" style="width:auto" onchange="H.ssD(this.value)">${dopts}</select><select class="inp" style="width:auto" onchange="H.ssM(this.value)"><option value="">All Managers</option>${mo}</select><div style="display:flex;border-radius:7px;overflow:hidden;border:1px solid #cdc4b2">${[['Active','Active'],['Inactive','Inactive'],['','All']].map(([v,l])=>`<button onclick="H.ssS('${v}')" style="padding:7px 13px;background:${fs===v?'#2C3B7E':'#fff'};color:${fs===v?'#fff':'#374151'};border:none;cursor:pointer;font-size:12px;font-weight:${fs===v?700:500};font-family:inherit">${l}</button>`).join('')}</div></div>
-    <div class="card" style="overflow:hidden"><div style="overflow-x:auto"><table class="tbl" style="min-width:1000px"><thead><tr><th>ID</th><th>Name</th><th>Manager</th><th>FT/PT</th><th>Status</th><th>Region</th><th>Gender</th><th>City</th><th>County</th><th>Zip</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    ${statusRulesCard()}
+    <div class="card" style="overflow:hidden"><div style="overflow-x:auto"><table class="tbl" style="min-width:1080px"><thead><tr><th>ID</th><th>Name</th><th>Manager</th><th>FT/PT</th><th title="Billable hours expected per two-week pay period. Grey = the standard for full time (${tg.ftHours}) or part time (${tg.ptHours}); bold = this person's own target.">Hours target<br><span style="font-weight:400;text-transform:none;letter-spacing:0">per pay period</span></th><th title="TripLog trips expected per month. Grey = the standard from Status rules; bold = this person's own number.">Trips allowed<br><span style="font-weight:400;text-transform:none;letter-spacing:0">per month</span></th><th>Status</th><th>Region</th><th>Gender</th><th>City</th><th>County</th><th>Zip</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
 function modH(){
@@ -5626,7 +5710,8 @@ function crAddDays(iso, n){ const d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.g
 // pool: {monthKey: {noteKey: {d, b, c, cl, m}}}; snapshots: {YYYY-MM-DD: {clientHash: staffId}}
 // resolveStaff(name) -> staff id or null; hash(clientId) -> Promise<string>; todayISO: 'YYYY-MM-DD'
 // hoursStaff: Set of staff ids allowed to receive hours (Community roster + anyone already tracked)
-async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursStaff}){
+async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursStaff, rules}){
+  const R = Object.assign({}, STATUS_RULES_DEFAULT, rules||{});
   const rows = [];
   let minD = null, maxD = null;
   Object.values(pool||{}).forEach(month=>{
@@ -5638,7 +5723,7 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       if(!maxD || d>maxD) maxD=d;
     });
   });
-  const out = {hours:{}, caseload:{}, late:{}, skipped:[], computed:[], gaps:{hours:[], late:[], caseload:[]}};
+  const out = {hours:{}, caseload:{}, late:{}, ppLate:{}, lateOther:{}, conc:{}, detail:{}, out7:null, skipped:[], computed:[], gaps:{hours:[], late:[], caseload:[]}};
   if(!rows.length) return out;
   const daySet = new Set(rows.map(r=>r.d));
   const gapNote = (what, ws, we, miss) => out.skipped.push(`${what} ${ws} – ${we}: no notes on file for ${miss.length} weekday${miss.length!==1?'s':''} (${miss.slice(0,3).join(', ')}${miss.length>3?'…':''}) — upload a Notes export covering ${ws} to ${we}`);
@@ -5667,6 +5752,22 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
     const per = {};
     Object.entries(mins).forEach(([id,v])=>{ per[id] = Math.round(v/60*100)/100; });
     if(Object.keys(per).length){ out.hours[pe] = per; out.computed.push(label); }
+    // ── Late notes for the whole pay period (added 11/16/26, per Brandon — Director Hub team tables) ──
+    // Same late rule as the weekly count below (H0038 / GT / HM, started more than 48 hours late),
+    // but totalled over the two-week pay period and with hours: n = late notes, o = hours past the
+    // 48-hour mark added up across those notes, s = service hours (visit length) sitting in them.
+    // Everyone with a peer support note in the period gets a record, so 0 means "none late".
+    {
+      const pp = inP.filter(r=>/^H0038( GT| HM)?$/i.test(r.code));
+      const noL = pp.filter(r=>typeof r.l!=='number');
+      if(pp.length && noL.length <= Math.max(2, pp.length*0.02)){
+        const lt = {};
+        pp.forEach(r=>{ const id=staffOf(r.by); if(id==null) return; const x = lt[id] || (lt[id]={n:0,o:0,s:0});
+          if(typeof r.l==='number' && r.l>48){ x.n++; x.o += r.l-48; x.s += (typeof r.m==='number' ? r.m : 0)/60; } });
+        Object.values(lt).forEach(x=>{ x.o = Math.round(x.o*10)/10; x.s = Math.round(x.s*100)/100; });
+        if(Object.keys(lt).length) out.ppLate[pe] = lt;
+      }
+    }
   }
   if(hoursOld.length) out.skipped.push(`Billable hours: ${hoursOld.length} pay period${hoursOld.length!==1?'s':''} (from ${hoursOld.sort()[0]}) need a Notes export re-uploaded that covers them`);
 
@@ -5726,6 +5827,40 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       const cnt = {};
       ps.forEach(r=>{ const id=staffOf(r.by); if(id==null) return; cnt[id]=(cnt[id]||0) + ((typeof r.l==='number' && r.l>48) ? 1 : 0); });
       if(Object.keys(cnt).length){ out.late[we] = cnt; out.computed.push(label); }
+      // ── Added 11/18/26 (Sarah's answers) ──
+      // Which notes were late, so managers can see who/when/which client (QA and training), not
+      // just a count. Linkage (H0038 U1–U9) and G9009 notes are counted separately (lateOther) so
+      // Debra can see what still needs entering without changing the Community peer support count.
+      // Client numbers stay out of 'pd' (which browsers cache); they go to appdata staff_flag_detail.
+      const det = out.detail[we] = {late:[], conc:[]};
+      const oth = {};
+      rows.forEach(r=>{
+        if(r.d<ws || r.d>we || typeof r.l!=='number' || !(r.l>48)) return;
+        const isPS = /^H0038( GT| HM)?$/i.test(r.code), isOther = /^G9009/i.test(r.code) || /^H0038 U[1-9]\b/i.test(r.code);
+        if(!isPS && !isOther) return;
+        const id = staffOf(r.by); if(id==null) return;
+        if(isOther) oth[id] = (oth[id]||0) + 1;
+        det.late.push({s:id, d:r.d, cl:r.cl||'', c:r.code, l:Math.round(r.l*10)/10, o:isOther?1:0});
+      });
+      out.lateOther[we] = oth;
+      // Concentrated caseload: a client with more than R.concWeekHrs billable hours from one
+      // person in the week, or more than R.concDayHrs on a single day.
+      const byPC = {};
+      rows.forEach(r=>{
+        if(r.d<ws || r.d>we || !r.cl || !crIsProductive(r.code) || typeof r.m!=='number') return;
+        const id = staffOf(r.by); if(id==null) return;
+        const k = id+'|'+r.cl, x = byPC[k] || (byPC[k] = {s:id, cl:r.cl, wk:0, day:{}});
+        x.wk += r.m; x.day[r.d] = (x.day[r.d]||0) + r.m;
+      });
+      const conc = {};
+      Object.values(byPC).forEach(x=>{
+        const dayMax = Math.max(...Object.values(x.day));
+        if(x.wk > R.concWeekHrs*60 || dayMax > R.concDayHrs*60){
+          conc[x.s] = (conc[x.s]||0) + 1;
+          det.conc.push({s:x.s, cl:x.cl, wk:Math.round(x.wk/60*10)/10, day:Math.round(dayMax/60*10)/10});
+        }
+      });
+      out.conc[we] = conc;
     }
     if(lateOld.length) out.skipped.push(`Late notes: ${lateOld.length} week${lateOld.length!==1?'s':''} (from ${lateOld.sort()[0]}) need a Notes export re-uploaded that covers them`);
   }
@@ -5768,9 +5903,27 @@ async function crCompute({pool, snapshots, resolveStaff, hash, todayISO, hoursSt
       });
       const wk = {};
       Object.entries(per).forEach(([id,p])=>{
-        wk[id] = {caseload:p.caseload, outreach:Math.round(p.anyN/p.caseload*100), engagement:Math.round(p.billN/p.caseload*100)};
+        wk[id] = {caseload:p.caseload, outreach:Math.round(p.anyN/p.caseload*100), engagement:Math.round(p.billN/p.caseload*100), noOut:p.caseload-p.anyN, noEng:p.caseload-p.billN};
       });
       if(Object.keys(wk).length){ out.caseload[we] = wk; out.computed.push(`${label} (caseload as of ${snapKey})`); }
+    }
+    // ── 7-day outreach rule (added 11/18/26, Sarah) ── every client on a person's current caseload
+    // should have a note (any provider) within R.outreachDays days of the last one. Measured
+    // against the last day of notes on file. Client numbers go to staff_flag_detail only.
+    {
+      const latest = snapDates[snapDates.length-1];
+      const hashToCl = {}; Object.entries(clientHash).forEach(([cl,h])=>{ hashToCl[h]=cl; });
+      const lastSeen = {};
+      rows.forEach(r=>{ if(!r.cl) return; const h=clientHash[r.cl]; if(!lastSeen[h] || r.d>lastSeen[h]) lastSeen[h]=r.d; });
+      const cutoff = crAddDays(maxD, -R.outreachDays);
+      const by = {};
+      Object.entries(snapshots[latest]||{}).forEach(([h,id])=>{
+        const last = lastSeen[h] || null;
+        if(last && last >= cutoff) return;
+        if(!last && !hashToCl[h]) return;  // client never seen in the notes on file: can't judge
+        (by[id] = by[id] || []).push({cl:hashToCl[h]||'', last});
+      });
+      out.out7 = {asOf:maxD, caseloadAsOf:latest, days:R.outreachDays, byStaff:by};
     }
   }
   return out;
@@ -5872,8 +6025,17 @@ async function recomputeCommunityFromRaw(opts){
     // pages don't suddenly sprout hours numbers they never showed before.
     const hoursStaff = new Set(S.staff.filter(s=>String(s.program||'').toLowerCase()==='community').map(s=>s.id));
     Object.values(S.pd||{}).forEach(per=>Object.entries(per||{}).forEach(([id,rec])=>{ if(rec && typeof rec.hours==='number' && rec.hours>0) hoursStaff.add(Number(id)); }));
-    const res = await crCompute({pool:S.linkageNotesRaw, snapshots, resolveStaff, hash:retHash, todayISO:new Date().toISOString().slice(0,10), hoursStaff});
-    const hKeys = Object.keys(res.hours), cKeys = Object.keys(res.caseload), lKeys = Object.keys(res.late||{});
+    const res = await crCompute({pool:S.linkageNotesRaw, snapshots, resolveStaff, hash:retHash, todayISO:new Date().toISOString().slice(0,10), hoursStaff, rules:S.statusRules});
+    // Late-note list, concentrated-caseload clients and the 7-day outreach list (11/18/26). These
+    // name client numbers, so they live in their own appdata key that no hub caches in the browser.
+    try{
+      const weeks = {};
+      Object.keys(res.detail||{}).sort().slice(-CR_LOOKBACK_WEEKS).forEach(k=>{ weeks[k] = res.detail[k]; });
+      if(Object.keys(weeks).length || res.out7){
+        await db.upsert('appdata', {key:'staff_flag_detail', value:JSON.stringify({updatedAt:new Date().toISOString(), weeks, out7:res.out7})}, 'key');
+      }
+    }catch(e){ console.warn('[staff_flag_detail]', e); }
+    const hKeys = Object.keys(res.hours), cKeys = Object.keys(res.caseload), lKeys = Object.keys(res.late||{}), ppKeys = Object.keys(res.ppLate||{});
     // Clear numbers an earlier run computed from incomplete notes (a gap between uploads), so the
     // hubs show "—" instead of a half-period that looks like a big drop.
     let cleared = 0;
@@ -5882,8 +6044,8 @@ async function recomputeCommunityFromRaw(opts){
       Object.entries(S.pd[k]).forEach(([id,rec])=>{ if(!rec || typeof rec!=='object') return; fields.forEach(f=>{ if(f in rec){ delete rec[f]; cleared++; } }); });
       if(flag) delete S.pd[k][flag];
     };
-    (res.gaps||{hours:[]}).hours.forEach(k=>clearFields(k, ['hours']));
-    (res.gaps||{late:[]}).late.forEach(k=>clearFields(k, ['lateNotes'], '_lnImported'));
+    (res.gaps||{hours:[]}).hours.forEach(k=>clearFields(k, ['hours','ppLate']));
+    (res.gaps||{late:[]}).late.forEach(k=>clearFields(k, ['lateNotes','lateOther','conc'], '_lnImported'));
     (res.gaps||{caseload:[]}).caseload.forEach(k=>clearFields(k, ['caseload','outreach','engagement']));
     // Pay period to date (11/16/26): drop any earlier to-date numbers, then write the current ones.
     let tdChanged = false;
@@ -5908,13 +6070,19 @@ async function recomputeCommunityFromRaw(opts){
       cc.skipped.forEach(x=>res.skipped.push(x));
       if(ccMonths.length){ tdChanged = true; res.clientMonths = ccMonths; }
     }catch(e){ console.warn('[crClientCounts]', e); }
-    if((cleared || tdChanged) && !(hKeys.length || cKeys.length || lKeys.length)) await sv('p', S.pd);
+    if((cleared || tdChanged) && !(hKeys.length || cKeys.length || lKeys.length || ppKeys.length)) await sv('p', S.pd);
     if(ccMonths.length) recordImport('courts_billing', {row_count:ccMonths.reduce((a,k)=>a+Object.keys(S.pd[k]||{}).length,0), period_label:ccMonths.slice().sort().pop(), data_through:ccMonths.slice().sort().pop(), source_filename:'computed from Pimsy Notes (all notes)'});
-    if(hKeys.length || cKeys.length || lKeys.length){
+    if(hKeys.length || cKeys.length || lKeys.length || ppKeys.length){
       S.pd = S.pd || {};
+      // Pay-period late notes (11/16/26): replace the whole period so someone whose notes were re-attributed doesn't keep an old count.
+      ppKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.values(S.pd[k]).forEach(rec=>{ if(rec && typeof rec==='object') delete rec.ppLate; }); Object.entries(res.ppLate[k]).forEach(([id,v])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), ppLate:v}; }); });
       hKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.hours[k]).forEach(([id,h])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), hours:h}; }); });
       cKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.caseload[k]).forEach(([id,v])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), ...v}; }); });
-      lKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.late[k]).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), lateNotes:n}; }); S.pd[k]._lnImported = true; });
+      lKeys.forEach(k=>{ S.pd[k] = S.pd[k]||{}; Object.entries(res.late[k]).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), lateNotes:n}; }); S.pd[k]._lnImported = true;
+        // Linkage/G9009 late counts and concentrated-caseload counts for the same week (11/18/26)
+        Object.values(S.pd[k]).forEach(rec=>{ if(rec && typeof rec==='object'){ delete rec.lateOther; delete rec.conc; } });
+        Object.entries((res.lateOther||{})[k]||{}).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), lateOther:n}; });
+        Object.entries((res.conc||{})[k]||{}).forEach(([id,n])=>{ S.pd[k][id] = {...(S.pd[k][id]||{}), conc:n}; }); });
       const ok = await sv('p', S.pd);
       if(!ok) return res;
       if(hKeys.length) recordImport('roster_hours', {row_count:hKeys.reduce((a,k)=>a+Object.keys(res.hours[k]).length,0), period_label:hKeys.slice().sort().pop(), data_through:hKeys.slice().sort().pop(), source_filename:'computed from Pimsy Notes'});
@@ -6109,6 +6277,8 @@ const SC = (function(){
         const k = norm(user), mo = monthOf(d);
         byUser[k] = byUser[k] || {n:user, mo:{}};
         const b = byUser[k].mo[mo] = byUser[k].mo[mo] || {s:0,a:0,u:0};
+        // per-day trip counts (11/18/26) so Director Hub can show trips per pay period, not just per month
+        const dk = String(d).slice(0,10); byUser[k].dy = byUser[k].dy || {}; byUser[k].dy[dk] = (byUser[k].dy[dk]||0) + 1;
         if(st==='submitted') b.s++;
         else if(st==='approved' || st==='rejected' || st==='pay scheduled' || st==='paid' || st==='reimbursed') b.a++;
         else b.u++;   // blank = staff hasn't submitted yet (not the manager's step)
@@ -9554,6 +9724,34 @@ async delSRow(enc){
       return;
     }
     if(transferringToCC)renderV();
+  },
+  // Individual hours target (11/16/26). Blank or 0 clears it back to the standard FT/PT target.
+  async upTrips(id,inp){
+    const raw=String(inp.value||'').trim();
+    const v=raw===''?null:Number(raw);
+    if(v!==null&&(!isFinite(v)||v<=0||v>500)){alert('Enter the number of trips this person is expected to need in a month, or leave it blank to use the standard.');renderV();return;}
+    await this.upS(id,'tripsAllowed',v===null?null:Math.round(v));
+    renderV();
+  },
+  // Status rules card (11/18/26). Saves the whole shared rules object.
+  async saveStatusRules(){
+    const f=k=>{const el=document.getElementById('sr-'+k);if(!el)return S.statusRules[k];if(el.type==='checkbox')return el.checked;const t=String(el.value||'').trim();if(t==='')return null;const n=Number(t);return isFinite(n)?n:S.statusRules[k];};
+    const next={};Object.keys(STATUS_RULES_DEFAULT).forEach(k=>{next[k]=f(k);});
+    const need=['hoursRedBelow','hoursGreenAt','engRedBelow','engGreenAt','outRedBelow','outGreenAt','lateGreenMax','lateRedOver','concWeekHrs','concDayHrs','outreachDays'];
+    const blank=need.filter(k=>next[k]==null);if(blank.length){alert('These can\'t be blank: '+blank.join(', ')+'. Only Wellness, Overtime approval and Trips can be left blank to turn them off.');return;}
+    if(next.hoursRedBelow>next.hoursGreenAt||next.engRedBelow>next.engGreenAt||next.outRedBelow>next.outGreenAt||next.lateGreenMax>next.lateRedOver){alert('Each red line has to be below (or for late notes, above) its green line.');return;}
+    next.updatedAt=new Date().toISOString();next.updatedBy=(DS_USER&&DS_USER.name)||'';
+    const ok=await db.upsert('appdata',{key:'status_rules',value:JSON.stringify(next)},'key');
+    if(!ok){showSaveError('Status rules were not saved — check your connection and try again.');return;}
+    S.statusRules={...STATUS_RULES_DEFAULT,...next};S.srOpen=false;renderV();
+  },
+  srToggle(){S.srOpen=!S.srOpen;renderV();},
+  async upHrsTarget(id,inp){
+    const raw=String(inp.value||'').trim();
+    const v=raw===''?null:Number(raw);
+    if(v!==null&&(!isFinite(v)||v<=0||v>120)){alert('Enter the billable hours expected per two-week pay period (for example 52), or leave it blank to use the standard target.');renderV();return;}
+    await this.upS(id,'hrsTarget',v);
+    renderV();
   },
   async upName(id,field,inp){
     const v=(inp.value||'').trim().replace(/\s+/g,' ');
