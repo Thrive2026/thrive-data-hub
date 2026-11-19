@@ -6495,6 +6495,88 @@ async function dhscHash(str){ // same salt as Director Hub so weekly uploads de-
 }
 const dhscRows = (X, wb, pattern) => { const name = pattern ? wb.SheetNames.find(n=>pattern.test(n)) : wb.SheetNames[0];
   if(!name) return null; return X.utils.sheet_to_json(wb.Sheets[name], {header:1, raw:true, defval:null, blankrows:false}); };
+
+// ══════════════════════════════════════════════════════════
+// LINK UNMATCHED NAMES TO THE ROSTER (11/19/26, per Brandon)
+// Uploads (TripLog first) list names that don't match anyone on the roster — usually a spelling
+// difference ("Cyrstal Stahl", "Kim Paridon"). Each one can be linked to the right person here.
+// The link is saved as a row in the shared Supabase staff_aliases table, so it is remembered for
+// every future upload and by every hub that resolves names through staff_aliases (Director Hub,
+// Pimsy Notes, supervision, etc.). Linking after Confirm & Save also works: names are matched
+// when the data is read, not when it's saved.
+// ══════════════════════════════════════════════════════════
+function aliasLev(a,b){ if(a===b) return 0; const m=a.length,n=b.length; if(!m||!n) return m||n; let prev=Array.from({length:n+1},(_,j)=>j);
+  for(let i=1;i<=m;i++){ const cur=[i]; for(let j=1;j<=n;j++) cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1)); prev=cur; } return prev[n]; }
+// Best-guess roster match for an unmatched name, or null. Close spellings of the full name, the
+// same last name with a shortened first name (Kim/Kimberly), or a misspelled last name with the
+// same first name. Only active staff are considered.
+function aliasGuess(raw){
+  const k = normAliasName(raw).replace(/[^a-z\s'-]/g,' ').replace(/\s+/g,' ').trim(); const t=k.split(' '); if(t.length<2) return null;
+  const f=t[0], l=t[t.length-1]; let best=null, bestScore=99;
+  (S.staff||[]).filter(st=>st.fn&&st.ln&&st.status!=='Inactive').forEach(st=>{
+    const sf=normAliasName(st.fn).replace(/[^a-z\s'-]/g,''), sl=normAliasName(st.ln).replace(/[^a-z\s'-]/g,'');
+    const dFull=aliasLev(k, sf+' '+sl), dL=aliasLev(l, sl), dF=aliasLev(f, sf);
+    let score=99;
+    if(dFull<=2) score=dFull;
+    else if(dL===0 && (sf.startsWith(f)||f.startsWith(sf)||dF<=2)) score=1.5;
+    else if(dL<=2 && dF===0) score=2.5;
+    else if(dL===0 && sf[0]===f[0]) score=3;
+    if(score<bestScore){ bestScore=score; best=st; }
+  });
+  return best ? best.id : null;
+}
+function aliasLinkPanel(kind, p){
+  const list = (p.unmatched||[]).filter(u=>!u.done);
+  const done = (p.unmatched||[]).filter(u=>u.done);
+  if(!list.length && !done.length) return '';
+  const staff = (S.staff||[]).filter(st=>st.fn&&st.ln&&st.status!=='Inactive').slice().sort((a,b)=>(a.ln+a.fn).localeCompare(b.ln+b.fn));
+  const opts = sel => `<option value="">— pick the person —</option><option value="__none"${sel==='__none'?' selected':''}>Not on our roster (skip)</option>`
+    + staff.map(st=>`<option value="${st.id}"${String(sel)===String(st.id)?' selected':''}>${dhscEsc(st.ln)}, ${dhscEsc(st.fn)} (${dhscEsc(st.id)}${st.mgr?' · '+dhscEsc((MGR[st.mgr]&&MGR[st.mgr].full)||st.mgr):''})</option>`).join('');
+  const rows = (p.unmatched||[]).map((u,i)=>{
+    if(u.done) return `<div style="display:flex;gap:8px;align-items:center;padding:3px 0;color:${u.done==='skip'?'#8089a8':'#1B5E20'}">${u.done==='skip'?'—':'✓'} <b>${dhscEsc(u.raw)}</b> ${u.done==='skip'?'skipped (not on the roster)':'linked to '+dhscEsc(u.linkedName||'')}</div>`;
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;border-top:1px solid #f0ebe1">
+      <div style="width:130px;font-weight:600;color:#1a2861">${dhscEsc(u.raw)}</div>
+      <select id="al-${kind}-${i}" style="font-size:12px;padding:3px 6px;border:1px solid ${u.guess?'#3c50a0':'#cdc4b2'};border-radius:4px;font-family:inherit;width:220px">${opts(u.guess)}</select>
+      ${u.guess?'<span style="font-size:10px;color:#3c50a0">suggested — check it</span>':''}
+      <button class="btn-g" style="font-size:11px" onclick="aliasLink('${kind}',${i})">Link</button>
+      ${u.err?`<div style="flex-basis:100%;color:#991B1B;font-size:11px">${dhscEsc(u.err)}</div>`:''}
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:10px;padding:10px 12px;background:#faf6ee;border:1px solid #e6dfd2;border-radius:6px">
+    <div style="font-weight:700;color:#1a2861;margin-bottom:2px">Names to link to the roster</div>
+    <div style="font-size:11px;color:#8089a8;margin-bottom:6px">Pick who each name belongs to and click Link. It's remembered for every future upload and every hub. Suggestions are a best guess from the spelling — check them.${list.length>1?` <a href="#" onclick="aliasLinkAll('${kind}');return false" style="color:#3c50a0">Link all that have a person picked</a>`:''}</div>
+    ${rows}</div>`;
+}
+async function aliasLink(kind, i, bulk){
+  const p = DHSC[kind]; const u = p && p.unmatched && p.unmatched[i]; if(!u || u.done) return true;
+  const el = document.getElementById(`al-${kind}-${i}`); const v = el ? el.value : '';
+  if(!v){ if(!bulk){ u.err='Pick a person first, or choose "Not on our roster".'; dhscRefresh(); } return false; }
+  if(v==='__none'){ u.done='skip'; u.err=null; if(!bulk) dhscRefresh(); return true; }
+  const st = (S.staff||[]).find(x=>String(x.id)===String(v)); if(!st) return false;
+  const alias = normAliasName(u.raw);
+  try{
+    const r = await sbFetch(`${SB_URL}/rest/v1/staff_aliases`,{method:'POST',body:JSON.stringify({staff_id:st.id, alias_norm:alias})},{'Prefer':'return=minimal'});
+    if(!r.ok){
+      const t = await r.text();
+      if(!/duplicate|23505/i.test(t)) throw new Error(t.slice(0,200));
+      // already saved once (e.g. a second upload in the same session): point it at this person
+      const r2 = await sbFetch(`${SB_URL}/rest/v1/staff_aliases?alias_norm=eq.${encodeURIComponent(alias)}`,{method:'PATCH',body:JSON.stringify({staff_id:st.id})});
+      if(!r2.ok) throw new Error((await r2.text()).slice(0,200));
+    }
+  }catch(e){
+    u.err = `Couldn't save the link (${e.message}). Ask Brandon to run in Supabase: insert into staff_aliases (staff_id, alias_norm) values (${st.id}, '${alias.replace(/'/g,"''")}');`;
+    if(!bulk) dhscRefresh(); return false;
+  }
+  STAFF_ALIAS_MAP[alias] = st.id;
+  u.done='linked'; u.err=null; u.linkedName = `${st.fn} ${st.ln}`;
+  if(!bulk) dhscRefresh();
+  return true;
+}
+async function aliasLinkAll(kind){
+  const p = DHSC[kind]; if(!p||!p.unmatched) return;
+  for(let i=0;i<p.unmatched.length;i++){ await aliasLink(kind, i, true); }
+  dhscRefresh();
+}
 function dhscResolver(){
   const byName=new Map(), byId=new Map(), byFL=new Map();
   (S.staff||[]).forEach(st=>{ if(st.fn&&st.ln){ const k=SC.norm(st.fn+' '+st.ln); byName.set(k,st); const t=k.split(' '); if(t.length>2&&!byFL.has(t[0]+' '+t[t.length-1])) byFL.set(t[0]+' '+t[t.length-1],st); if(st.id!=null) byId.set(String(st.id),st); } });
@@ -6533,14 +6615,15 @@ async function dhscSlot(kind, f, quiet){
         apply: async()=>{ const merged = SC.mergeNotes(await dhscGet(DHSC_KEYS.notes), p); merged.updatedAt = now; await dhscSet(DHSC_KEYS.notes, merged); } };
     } else if(kind==='tl'){
       let text;
-      if(/\.zip$/i.test(f.name)){ const z=X.CFB.read(new Uint8Array(buf),{type:'array'}); const e=z.FileIndex.find(x=>/\.csv$/i.test(x.name)); if(!e) throw new Error('No .csv found inside that zip.'); text=new TextDecoder().decode(e.content); }
+      if(/\.zip$/i.test(f.name)){ const z=X.CFB.read(new Uint8Array(buf),{type:'array'}); const es=z.FileIndex.filter(x=>/\.csv$/i.test(x.name)&&!/stay_time/i.test(x.name)); if(!es.length) throw new Error('No .csv found inside that zip.'); text=es.map(e=>new TextDecoder().decode(e.content)).join('\n'); }
       else text = new TextDecoder().decode(buf);
       const p = SC.parseTripLog(text);
-      const unk = Object.values(p.byUser).filter(u=>!resolve(u.n)).map(u=>u.n);
+      const unk = Object.values(p.byUser).filter(u=>!resolve(u.n)).map(u=>u.n).sort();
       const v = { updatedAt:now, asof:p.asof, byUser:p.byUser };
       DHSC[kind] = { lines:[`${p.trips} trips across ${p.users} staff · report generated ${p.asof||'?'}`,
-        unk.length?`${unk.length} TripLog users not on the roster won’t count: ${unk.slice(0,10).map(dhscEsc).join(', ')}${unk.length>10?'…':''}`:'All TripLog users matched the roster',
+        unk.length?`${unk.length} TripLog name${unk.length!==1?'s':''} aren’t linked to anyone on the roster yet — link them below so their trips count`:'All TripLog users matched the roster',
         'Saved: trip counts per staff/month/status only — no addresses, amounts, or tags.'],
+        unmatched: unk.map(n=>({raw:n, guess:aliasGuess(n)})),
         apply: async()=>{ await dhscSet(DHSC_KEYS.tl, v); } };
     } else if(kind==='jf'){
       // sheetRows cap: the Manager Approval checkbox column is filled down ~1M rows.
@@ -6579,6 +6662,7 @@ function dhscPreview(kind, rider){
   if(p.note) return box('#FFFBEB','#FCD34D', dhscEsc(p.note));
   if(p.error) return box('#FEE2E2','#FCA5A5', `<b style="color:#7F1D1D">Couldn’t use that file.</b> ${dhscEsc(p.error)}<div style="text-align:right;margin-top:6px"><button class="btn-g" style="font-size:11px" onclick="DHSC['${kind}']=null;dhscRefresh()">Dismiss</button></div>`);
   return box('#fff','#cdc4b2', p.lines.map(l=>`<div>${rider?'📊 ':'✅ '}${l}</div>`).join('')
+    + aliasLinkPanel(kind, p)
     + (rider ? '' : `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn-g" style="font-size:11px" onclick="DHSC['${kind}']=null;dhscRefresh()">Cancel</button><button class="btn-n" style="font-size:11px" onclick="dhscSave('${kind}')">Confirm &amp; Save</button></div>`));
 }
 
